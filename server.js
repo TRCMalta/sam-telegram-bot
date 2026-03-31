@@ -228,12 +228,17 @@ async function getFirefishPipeline() {
     const ago = new Date(now.getTime() - 90 * 86400000);
     const df = ago.toISOString().split("T")[0];
     const dt = now.toISOString().split("T")[0];
-    const plRaw = await firefishGet(
-      `/placements/search?dateFrom=${df}&dateTo=${dt}&limit=50`
-    );
-    const placements = Array.isArray(plRaw)
-      ? plRaw
-      : plRaw.Results || plRaw.data || [];
+    let placements = [];
+    try {
+      const plRaw = await firefishGet(
+        `/placements/search?dateFrom=${df}&dateTo=${dt}&limit=50`
+      );
+      placements = Array.isArray(plRaw)
+        ? plRaw
+        : plRaw.Results || plRaw.data || [];
+    } catch (plErr) {
+      console.log("Placements not available (scope not authorised):", plErr.message);
+    }
 
     let ctx = "=== CEEK TALENT — Recruitment (Firefish) ===\n";
     ctx += `Data as of: ${new Date().toLocaleString("en-GB", { timeZone: "Europe/Malta", dateStyle: "full", timeStyle: "short" })}\n`;
@@ -382,13 +387,13 @@ async function getOdooPipeline() {
           "partner_id",
           "stage_id",
           "expected_revenue",
-          "planned_revenue",
+          "expected_revenue",
           "date_deadline",
           "write_date",
           "user_id",
         ],
         limit: 80,
-        order: "planned_revenue DESC",
+        order: "expected_revenue DESC",
         context: { lang: "en_GB" },
       }
     );
@@ -402,11 +407,11 @@ async function getOdooPipeline() {
     );
 
     const totalActive = active.reduce(
-      (sum, o) => sum + (parseFloat(o.planned_revenue) || 0),
+      (sum, o) => sum + (parseFloat(o.expected_revenue) || 0),
       0
     );
     const totalWon = won.reduce(
-      (sum, o) => sum + (parseFloat(o.planned_revenue) || 0),
+      (sum, o) => sum + (parseFloat(o.expected_revenue) || 0),
       0
     );
 
@@ -422,7 +427,7 @@ async function getOdooPipeline() {
       const s = o.stage_id?.[1] || "Unknown";
       if (!stages[s]) stages[s] = { count: 0, val: 0 };
       stages[s].count++;
-      stages[s].val += parseFloat(o.planned_revenue) || 0;
+      stages[s].val += parseFloat(o.expected_revenue) || 0;
     });
 
     if (Object.keys(stages).length > 0) {
@@ -437,7 +442,7 @@ async function getOdooPipeline() {
       active.slice(0, 5).forEach((o) => {
         const name = o.name || "Untitled";
         const stage = o.stage_id?.[1] || "";
-        const val = parseFloat(o.planned_revenue) || 0;
+        const val = parseFloat(o.expected_revenue) || 0;
         const partner = o.partner_id?.[1] || "";
         ctx += `- ${name}`;
         if (partner) ctx += ` (${partner})`;
