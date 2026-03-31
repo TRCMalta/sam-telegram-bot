@@ -698,9 +698,22 @@ app.get("/debug", async (req, res) => {
         const jobs = await fetchJSON("https://api.firefishsoftware.com/api/v1/jobs?status=Open&limit=5", {
           headers: { Authorization: `Bearer ${token}` },
         });
+        results.firefish.raw_type = typeof jobs;
+        results.firefish.raw_isArray = Array.isArray(jobs);
+        results.firefish.raw_keys = typeof jobs === "object" && !Array.isArray(jobs) ? Object.keys(jobs).slice(0, 10) : "N/A";
+        results.firefish.raw_preview = JSON.stringify(jobs).substring(0, 200);
         const jobList = Array.isArray(jobs) ? jobs : jobs.Results || jobs.data || [];
         results.firefish.jobs_returned = jobList.length;
         if (jobList.length > 0) results.firefish.first_job = jobList[0].Title || jobList[0].JobTitle || "unknown";
+        // Also try v1.1
+        try {
+          const v11jobs = await fetchJSON("https://api.firefishsoftware.com/api/v1.1/jobs/search", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          results.firefish.v11_type = typeof v11jobs;
+          results.firefish.v11_keys = typeof v11jobs === "object" && !Array.isArray(v11jobs) ? Object.keys(v11jobs).slice(0, 10) : "array:" + (Array.isArray(v11jobs) ? v11jobs.length : "N/A");
+          results.firefish.v11_preview = JSON.stringify(v11jobs).substring(0, 200);
+        } catch(v11e) { results.firefish.v11_error = v11e.message.substring(0, 100); }
       } catch (jobErr) {
         results.firefish.jobs_error = jobErr.message;
       }
