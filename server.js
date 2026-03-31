@@ -27,9 +27,9 @@ const FIREFISH_CLIENT_SECRET = process.env.FIREFISH_CLIENT_SECRET;
 
 // Odoo
 const ODOO_DB = process.env.ODOO_DB || "thinktalent_prod";
-const ODOO_UID = parseInt(process.env.ODOO_UID || "2");
 const ODOO_API_KEY = process.env.ODOO_API_KEY;
 const ODOO_URL = process.env.ODOO_URL || "https://thinktalent.com.mt";
+const ODOO_LOGIN = process.env.ODOO_LOGIN; // e.g. admin email — used to authenticate and get UID
 
 // Allowed Telegram user IDs (Beverly + Jonathan)
 const ALLOWED_USERS = (process.env.ALLOWED_TELEGRAM_USERS || "")
@@ -191,7 +191,6 @@ async function firefishAuth() {
     grant_type: "client_credentials",
     client_id: FIREFISH_CLIENT_ID,
     client_secret: FIREFISH_CLIENT_SECRET,
-    scope: "api",
   });
 
   const res = await fetchJSON(
@@ -287,17 +286,69 @@ async function getFirefishPipeline() {
 
 // ─── Odoo JSON-RPC Client ─────────────────────────────────────────────────────
 
+let odooUidCache = null;
+
+async function odooGetUid() {
+  if (odooUidCache) return odooUidCache;
+
+  // If UID is explicitly set, use it
+  if (process.env.ODOO_UID) {
+    odooUidCache = parseInt(process.env.ODOO_UID);
+    console.log(`Odoo: using explicit UID ${odooUidCache}`);
+    return odooUidCache;
+  }
+
+  // Authenticate dynamically using ODOO_LOGIN + ODOO_API_KEY
+  if (ODOO_LOGIN) {
+    try {
+      const authBody = {
+        jsonrpc: "2.0",
+        method: "call",
+        params: {
+          service: "common",
+          method: "authenticate",
+          args: [ODOO_DB, ODOO_LOGIN, ODOO_API_KEY, {}],
+        },
+        id: 1,
+      };
+      console.log(`Odoo: authenticating as ${ODOO_LOGIN} on db ${ODOO_DB}...`);
+      const authResult = await fetchJSON(`${ODOO_URL}/jsonrpc`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(authBody),
+      });
+      if (authResult.result) {
+        odooUidCache = authResult.result;
+        console.log(`Odoo: authenticated successfully, UID = ${odooUidCache}`);
+        return odooUidCache;
+      } else {
+        console.error("Odoo auth failed:", JSON.stringify(authResult.error || authResult));
+      }
+    } catch (err) {
+      console.error("Odoo auth error:", err.message);
+    }
+  }
+
+  // Fallback to UID 2 (default admin)
+  console.log("Odoo: falling back to default UID 2");
+  odooUidCache = 2;
+  return odooUidCache;
+}
+
 async function odooRPC(model, method, domain, kwargs = {}) {
+  const uid = await odooGetUid();
   const body = {
     jsonrpc: "2.0",
     method: "call",
     params: {
       service: "object",
       method: "execute_kw",
-      args: [ODOO_DB, ODOO_UID, ODOO_API_KEY, model, method, domain, kwargs],
+      args: [ODOO_DB, uid, ODOO_API_KEY, model, method, domain, kwargs],
     },
     id: 1,
   };
+
+  console.log(`Odoo RPC: ${model}.${method} (uid=${uid}, db=${ODOO_DB})`);
 
   const result = await fetchJSON(`${ODOO_URL}/jsonrpc`, {
     method: "POST",
@@ -305,8 +356,11 @@ async function odooRPC(model, method, domain, kwargs = {}) {
     body: JSON.stringify(body),
   });
 
-  if (result.error)
-    throw new Error(result.error.message || JSON.stringify(result.error));
+  if (result.error) {
+    const errMsg = result.error.data?.message || result.error.message || JSON.stringify(result.error);
+    console.error(`Odoo RPC error: ${errMsg}`);
+    throw new Error(errMsg);
+  }
   return result.result;
 }
 
@@ -564,6 +618,43 @@ app.get("/set-webhook", async (req, res) => {
   }
 });
 
+app.get("/debug", async (req, res) => {
+  const results = { firefish: null, odoo: null };
+
+  // Test Firefish
+  try {
+    const token = await firefishAuth();
+    results.firefish = { status: "ok", token_preview: token ? token.substring(0, 10) + "..." : "none" };
+    try {
+      const jobs = await firefishGet("/jobs?status=Open&limit=5");
+      const jobList = Array.isArray(jobs) ? jobs : jobs.Results || jobs.data || [];
+      results.firefish.jobs_returned = jobList.length;
+      if (jobList.length > 0) results.firefish.first_job = jobList[0].Title || jobList[0].JobTitle || "unknown";
+    } catch (jobErr) {
+      results.firefish.jobs_error = jobErr.message;
+    }
+  } catch (err) {
+    results.firefish = { status: "error", message: err.message };
+  }
+
+  // Test Odoo
+  try {
+    const uid = await odooGetUid();
+    results.odoo = { status: "auth_ok", uid, db: ODOO_DB, url: ODOO_URL, login: ODOO_LOGIN || "not set" };
+    try {
+      const opps = await odooRPC("crm.lead", "search_read", [[["type", "=", "opportunity"]]], { fields: ["name"], limit: 3 });
+      results.odoo.opportunities_returned = opps.length;
+      if (opps.length > 0) results.odoo.first_opp = opps[0].name;
+    } catch (rpcErr) {
+      results.odoo.rpc_error = rpcErr.message;
+    }
+  } catch (err) {
+    results.odoo = { status: "error", message: err.message, db: ODOO_DB, url: ODOO_URL, login: ODOO_LOGIN || "not set" };
+  }
+
+  res.json(results);
+});
+
 app.get("/webhook-info", async (req, res) => {
   try {
     const result = await fetchJSON(
@@ -580,7 +671,7 @@ app.get("/webhook-info", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Sam TRC bot running on port ${PORT}`);
   console.log(`Firefish: ${FIREFISH_CLIENT_ID ? "configured" : "NOT SET"}`);
-  console.log(`Odoo: ${ODOO_API_KEY ? "configured" : "NOT SET"}`);
+  console.log(`Odoo: ${ODOO_API_KEY ? "configured" : "NOT SET"} (db=${ODOO_DB}, login=${ODOO_LOGIN || "not set"})`);
   console.log(`Claude: ${ANTHROPIC_API_KEY ? "configured" : "NOT SET"}`);
   console.log(`Telegram: ${TELEGRAM_TOKEN ? "configured" : "NOT SET"}`);
 });
