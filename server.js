@@ -621,17 +621,32 @@ app.get("/set-webhook", async (req, res) => {
 app.get("/debug", async (req, res) => {
   const results = { firefish: null, odoo: null };
 
-  // Test Firefish
+  // Test Firefish — raw auth response for debugging
   try {
-    const token = await firefishAuth();
-    results.firefish = { status: "ok", token_preview: token ? token.substring(0, 10) + "..." : "none" };
-    try {
-      const jobs = await firefishGet("/jobs?status=Open&limit=5");
-      const jobList = Array.isArray(jobs) ? jobs : jobs.Results || jobs.data || [];
-      results.firefish.jobs_returned = jobList.length;
-      if (jobList.length > 0) results.firefish.first_job = jobList[0].Title || jobList[0].JobTitle || "unknown";
-    } catch (jobErr) {
-      results.firefish.jobs_error = jobErr.message;
+    const params = new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: FIREFISH_CLIENT_ID,
+      client_secret: FIREFISH_CLIENT_SECRET,
+    });
+    const rawAuth = await fetchJSON("https://api.firefishsoftware.com/api/v1/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params.toString(),
+    });
+    const rawKeys = typeof rawAuth === "object" ? Object.keys(rawAuth) : ["(not an object: " + typeof rawAuth + ")"];
+    const token = rawAuth.access_token || rawAuth.AccessToken || rawAuth.token || rawAuth.Token || (typeof rawAuth === "string" ? rawAuth : null);
+    results.firefish = { status: "ok", response_keys: rawKeys, token_preview: token ? String(token).substring(0, 10) + "..." : "none" };
+    if (token) {
+      try {
+        const jobs = await fetchJSON("https://api.firefishsoftware.com/api/v1/jobs?status=Open&limit=5", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const jobList = Array.isArray(jobs) ? jobs : jobs.Results || jobs.data || [];
+        results.firefish.jobs_returned = jobList.length;
+        if (jobList.length > 0) results.firefish.first_job = jobList[0].Title || jobList[0].JobTitle || "unknown";
+      } catch (jobErr) {
+        results.firefish.jobs_error = jobErr.message;
+      }
     }
   } catch (err) {
     results.firefish = { status: "error", message: err.message };
