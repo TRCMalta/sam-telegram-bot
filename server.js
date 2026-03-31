@@ -620,6 +620,59 @@ app.get("/set-webhook", async (req, res) => {
   }
 });
 
+app.get("/test-scopes", async (_req, res) => {
+  const scopes = [
+    "candidatesAPI-read",
+    "companiesAPI-read", 
+    "jobsAPI-read",
+    "placementdetailsAPI-read",
+    "actionsAPI-read",
+    "advertsAPI-read",
+    "contactsAPI-read",
+    "candidatesAPI-write",
+    "contactsAPI-write",
+    "companiesAPI-write",
+    "jobsAPI-write",
+    "placementdetailsAPI-write",
+  ];
+  const results = {};
+  for (const scope of scopes) {
+    try {
+      const params = new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: FIREFISH_CLIENT_ID,
+        client_secret: FIREFISH_CLIENT_SECRET,
+        scope,
+      });
+      const r = await fetchJSON("https://api.firefishsoftware.com/authorization/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
+        body: params.toString(),
+      });
+      results[scope] = r.access_token ? "OK" : JSON.stringify(r).substring(0, 80);
+    } catch (e) {
+      results[scope] = "ERROR: " + e.message.substring(0, 80);
+    }
+  }
+  // Also try with NO scope at all
+  try {
+    const params2 = new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: FIREFISH_CLIENT_ID,
+      client_secret: FIREFISH_CLIENT_SECRET,
+    });
+    const r2 = await fetchJSON("https://api.firefishsoftware.com/authorization/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
+      body: params2.toString(),
+    });
+    results["NO_SCOPE"] = r2.access_token ? "OK" : JSON.stringify(r2).substring(0, 80);
+  } catch (e) {
+    results["NO_SCOPE"] = "ERROR: " + e.message.substring(0, 80);
+  }
+  res.json(results);
+});
+
 app.get("/debug", async (req, res) => {
   const results = { firefish: null, odoo: null };
 
