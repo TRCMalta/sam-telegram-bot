@@ -380,20 +380,19 @@ async function getOdooPipeline() {
     const opps = await odooRPC(
       "crm.lead",
       "search_read",
-      [[["type", "=", "opportunity"]]],
+      [[]],
       {
         fields: [
           "name",
           "partner_id",
           "stage_id",
           "expected_revenue",
-          "expected_revenue",
           "date_deadline",
           "write_date",
           "create_date",
           "user_id",
         ],
-        limit: 200,
+        limit: 2000,
         order: "create_date DESC",
         context: { lang: "en_GB" },
       }
