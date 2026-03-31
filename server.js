@@ -191,6 +191,7 @@ async function firefishAuth() {
     grant_type: "client_credentials",
     client_id: FIREFISH_CLIENT_ID,
     client_secret: FIREFISH_CLIENT_SECRET,
+    scope: "candidatesAPI-read companiesAPI-read jobsAPI-read placementdetailsAPI-read actionsAPI-read advertsAPI-read contactsAPI-read",
   });
 
   const res = await fetchJSON(
@@ -628,7 +629,8 @@ app.get("/debug", async (req, res) => {
       grant_type: "client_credentials",
       client_id: FIREFISH_CLIENT_ID,
       client_secret: FIREFISH_CLIENT_SECRET,
-    });
+    
+    scope: "candidatesAPI-read companiesAPI-read jobsAPI-read placementdetailsAPI-read actionsAPI-read advertsAPI-read contactsAPI-read",});
     const rawAuth = await fetchJSON("https://api.firefishsoftware.com/authorization/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded",
