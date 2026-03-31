@@ -380,7 +380,7 @@ async function getOdooPipeline() {
     const opps = await odooRPC(
       "crm.lead",
       "search_read",
-      [["active", "=", true]],
+      [[["active", "=", true]]],
       {
         fields: [
           "name",
