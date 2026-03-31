@@ -194,10 +194,11 @@ async function firefishAuth() {
   });
 
   const res = await fetchJSON(
-    "https://api.firefishsoftware.com/api/v1/token",
+    "https://api.firefishsoftware.com/authorization/token",
     {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json" },
       body: params.toString(),
     }
   );
@@ -628,9 +629,10 @@ app.get("/debug", async (req, res) => {
       client_id: FIREFISH_CLIENT_ID,
       client_secret: FIREFISH_CLIENT_SECRET,
     });
-    const rawAuth = await fetchJSON("https://api.firefishsoftware.com/api/v1/token", {
+    const rawAuth = await fetchJSON("https://api.firefishsoftware.com/authorization/token", {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json" },
       body: params.toString(),
     });
     const rawKeys = typeof rawAuth === "object" ? Object.keys(rawAuth) : ["(not an object: " + typeof rawAuth + ")"];
