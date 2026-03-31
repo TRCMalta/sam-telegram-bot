@@ -219,7 +219,7 @@ async function firefishGet(path) {
 
 async function getFirefishPipeline() {
   try {
-    const jobsRaw = await firefishGet("/jobs?status=Open&limit=50");
+    const jobsRaw = await firefishGet("/jobs/search?status=Open&limit=50"mit=50");
     const jobs = Array.isArray(jobsRaw)
       ? jobsRaw
       : jobsRaw.Results || jobsRaw.data || [];
@@ -229,7 +229,7 @@ async function getFirefishPipeline() {
     const df = ago.toISOString().split("T")[0];
     const dt = now.toISOString().split("T")[0];
     const plRaw = await firefishGet(
-      `/placements?dateFrom=${df}&dateTo=${dt}&limit=50`
+      `/placements/search?dateFrom=${df}&dateTo=${dt}&limit=50`
     );
     const placements = Array.isArray(plRaw)
       ? plRaw
