@@ -390,10 +390,11 @@ async function getOdooPipeline() {
           "expected_revenue",
           "date_deadline",
           "write_date",
+          "create_date",
           "user_id",
         ],
-        limit: 80,
-        order: "expected_revenue DESC",
+        limit: 200,
+        order: "create_date DESC",
         context: { lang: "en_GB" },
       }
     );
@@ -463,6 +464,28 @@ async function getOdooPipeline() {
       stale.slice(0, 3).forEach((o) => {
         ctx += `- ${o.name} (last updated: ${o.write_date})\n`;
       });
+    }
+
+    // New leads this month
+    const now2 = new Date();
+    const monthStart = new Date(now2.getFullYear(), now2.getMonth(), 1).toISOString().split("T")[0];
+    const newThisMonth = opps.filter((o) => o.create_date && o.create_date >= monthStart);
+    if (newThisMonth.length > 0) {
+      ctx += `\nNew opportunities created this month (${now2.toLocaleString("en-GB", { month: "long", year: "numeric", timeZone: "Europe/Malta" })}): ${newThisMonth.length}\n`;
+      newThisMonth.forEach((o) => {
+        const name = o.name || "Untitled";
+        const val = parseFloat(o.expected_revenue) || 0;
+        const stage = o.stage_id?.[1] || "";
+        const partner = o.partner_id?.[1] || "";
+        const created = o.create_date ? o.create_date.split(" ")[0] : "";
+        ctx += `- ${name}`;
+        if (partner) ctx += ` (${partner})`;
+        ctx += ` — ${stage}, EUR ${val.toLocaleString("en-GB")}`;
+        if (created) ctx += `, created: ${created}`;
+        ctx += "\n";
+      });
+    } else {
+      ctx += "\nNo new opportunities created this month.\n";
     }
 
     return ctx;
