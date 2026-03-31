@@ -373,14 +373,14 @@ async function odooRPC(model, method, domain, kwargs = {}) {
 
 async function getOdooPipeline() {
   if (!ODOO_API_KEY) {
-    return "=== THINK TALENT — Training Pipeline (Odoo) ===\nOdoo credentials not configured.\n";
+    return "=== THINK TALENT — FULL CRM Pipeline (Odoo, LIVE data, ALL time periods) ===\nThis is live data from the complete Odoo CRM. You have access to ALL leads and opportunities across ALL months, not just the current month. When asked about any time period, analyse the create_date field to filter records.\nOdoo credentials not configured.\n";
   }
 
   try {
     const opps = await odooRPC(
       "crm.lead",
       "search_read",
-      [[]],
+      [["active", "=", true]],
       {
         fields: [
           "name",
@@ -481,11 +481,29 @@ async function getOdooPipeline() {
         if (partner) ctx += ` (${partner})`;
         ctx += ` — ${stage}, EUR ${val.toLocaleString("en-GB")}`;
         if (created) ctx += `, created: ${created}`;
+       const salesperson = o.user_id?.[1] || "";
+       if (salesperson) ctx += ` [${salesperson}]`;
         ctx += "\n";
       });
     } else {
       ctx += "\nNo new opportunities created this month.\n";
     }
+
+    
+    // Salesperson summary
+    const byUser = {};
+    opps.forEach((o) => {
+      const user = o.user_id?.[1] || "Unassigned";
+      if (!byUser[user]) byUser[user] = { count: 0, value: 0 };
+      byUser[user].count++;
+      byUser[user].value += parseFloat(o.expected_revenue) || 0;
+    });
+    ctx += "\nPipeline by salesperson:\n";
+    Object.entries(byUser)
+      .sort((a, b) => b[1].count - a[1].count)
+      .forEach(([user, data]) => {
+        ctx += `- ${user}: ${data.count} records, EUR ${data.value.toLocaleString("en-GB")}\n`;
+      });
 
     return ctx;
   } catch (err) {
