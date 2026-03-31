@@ -695,7 +695,7 @@ app.get("/debug", async (req, res) => {
     results.firefish = { status: "ok", response_keys: rawKeys, token_preview: token ? String(token).substring(0, 10) + "..." : "none" };
     if (token) {
       try {
-        const jobs = await fetchJSON("https://api.firefishsoftware.com/api/v1/jobs?status=Open&limit=5", {
+        const jobs = await fetchJSON("https://api.firefishsoftware.com/api/v1.1/jobs?status=Open&limit=5", {
           headers: { Authorization: `Bearer ${token}` },
         });
         results.firefish.raw_type = typeof jobs;
