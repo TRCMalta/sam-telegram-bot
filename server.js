@@ -51,7 +51,7 @@ const processedWAMessages = new Set();
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 // ─── Beverly's System Prompt ──────────────────────────────────────────────────
-const SYSTEM_PROMPT = `Today is ${new Date().toLocaleDateString('en-GB', {weekday:'long', day:'numeric', month:'long', year:'numeric'})}.
+const SYSTEM_PROMPT = `Today's date is ${new Date().toLocaleDateString("en-GB", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. The current year is ${new Date().getFullYear()}.
 
 You are Sam, the personal AI chief of staff for Beverly Cutajar, COO of The Remarkable Collective (TRC).
 
