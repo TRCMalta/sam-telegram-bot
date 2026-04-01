@@ -370,6 +370,7 @@ const SAM_TOOLS = [
       },
       required: ["model", "record_id", "note"]
     }
+  },
   {
     name: "get_available_tags",
     description: "[ODOO CRM — Think Talent ONLY] List all CRM tags/labels with colors and lead counts. Tags exist ONLY in Odoo (Think Talent), NOT in Firefish (Ceek).",
