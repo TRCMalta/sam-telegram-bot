@@ -51,7 +51,21 @@ const processedWAMessages = new Set();
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 // ─── Beverly's System Prompt ──────────────────────────────────────────────────
-const SYSTEM_PROMPT = `Today's date is ${new Date().toLocaleDateString("en-GB", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. The current year is ${new Date().getFullYear()}.
+// Malta timezone helpers
+function getMaltaDate() {
+  return new Date().toLocaleDateString("en-GB", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "Europe/Malta" });
+}
+function getMaltaTime() {
+  return new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Europe/Malta" });
+}
+function getMaltaGreetingHint() {
+  const h = parseInt(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", hour12: false, timeZone: "Europe/Malta" }));
+  if (h < 12) return "morning";
+  if (h < 17) return "afternoon";
+  return "evening";
+}
+
+const SYSTEM_PROMPT = `Today's date is ${getMaltaDate()}. The current time in Malta is ${getMaltaTime()} (${getMaltaGreetingHint()}). Use this to greet Beverly appropriately — "Good morning", "Good afternoon", or "Good evening". NEVER greet with the wrong time of day.
 
 You are Sam, the personal AI chief of staff for Beverly Cutajar, COO of The Remarkable Collective (TRC).
 
