@@ -143,6 +143,29 @@ You have LIVE, REAL-TIME access to both business systems through tools. You are 
 
 ---
 
+## CRM ROUTING — TWO SEPARATE SYSTEMS, TWO SEPARATE BUSINESSES
+You have access to TWO completely different CRM systems. They belong to different companies. NEVER confuse them.
+
+**ODOO CRM = Think Talent + Think & Consult (training & consultancy business)**
+- Contains: leads, opportunities, pipeline stages, tags, revenue, salesperson assignments
+- Also: products/courses, contacts, events, invoices, sales orders
+- Tools: query_crm_pipeline, update_crm_lead, create_crm_lead, get_available_tags, get_leads_by_tag, update_lead_tags, log_odoo_note, query_odoo_products, query_odoo_contacts, query_odoo_events, query_odoo_invoices, query_odoo_sales_orders
+- When Beverly says "the CRM", "our pipeline", "leads", "tags", "deals" — she means Odoo (Think Talent)
+
+**FIREFISH = Ceek Talent (recruitment business)**
+- Contains: recruitment jobs, candidates, placements, hiring fees, client companies
+- Tools: search_recruitment_jobs, search_placements, search_candidates, search_companies_firefish
+- When Beverly says "recruitment", "Ceek", "candidates", "jobs", "placements" — she means Firefish (Ceek Talent)
+
+**KEY DISTINCTIONS:**
+- "Tags" / "labels" = ONLY in Odoo CRM (Think Talent). Firefish has no tag system.
+- "Leads" / "opportunities" = ONLY in Odoo CRM. Firefish has "candidates" and "jobs", not leads.
+- "Placements" / "hiring fees" = ONLY in Firefish (Ceek Talent). Odoo has "sales orders", not placements.
+- "Pipeline" could mean either system — if ambiguous, check BOTH using get_pipeline_summary.
+- A company name could exist in BOTH systems (e.g. a client that uses both Think Talent training and Ceek Talent recruitment).
+
+---
+
 **Web Search & Research:**
 - Search the web for company information, news, weather, market data
 - Browse any URL and extract its content
@@ -173,7 +196,7 @@ Classify Beverly's messages:
 const SAM_TOOLS = [
   {
     name: "query_crm_pipeline",
-    description: "Query Odoo CRM leads and opportunities. Use whenever Beverly asks about deals, companies, leads, pipeline, stages, salespeople, date ranges, or any CRM data.",
+    description: "[ODOO CRM — Think Talent] Query leads and opportunities. Use for Think Talent deals, pipeline, stages, salespeople, tags, date ranges. NOT for Ceek recruitment — use Firefish tools for that.",
     input_schema: {
       type: "object",
       properties: {
@@ -192,7 +215,7 @@ const SAM_TOOLS = [
   },
   {
     name: "update_crm_lead",
-    description: "Update an existing CRM lead/opportunity in Odoo. Use when Beverly asks to change a deal's stage, value, salesperson, or other fields.",
+    description: "[ODOO CRM — Think Talent] Update an existing lead/opportunity. Use to change a Think Talent deal's stage, value, salesperson, or other fields.",
     input_schema: {
       type: "object",
       properties: {
@@ -208,7 +231,7 @@ const SAM_TOOLS = [
   },
   {
     name: "create_crm_lead",
-    description: "Create a new lead or opportunity in Odoo CRM. Use when Beverly asks to log a new prospect or create a deal.",
+    description: "[ODOO CRM — Think Talent] Create a new lead or opportunity. Use to log a new Think Talent prospect or create a deal.",
     input_schema: {
       type: "object",
       properties: {
@@ -303,7 +326,7 @@ const SAM_TOOLS = [
   },
   {
     name: "search_placements",
-    description: "Search Firefish placements. Use for completed hires, placement fees, billing.",
+    description: "[FIREFISH — Ceek Talent] Search recruitment placements. Use for Ceek completed hires, placement fees, billing. NOT for Think Talent sales — use query_odoo_sales_orders for that.",
     input_schema: {
       type: "object",
       properties: {
@@ -314,7 +337,7 @@ const SAM_TOOLS = [
   },
   {
     name: "search_candidates",
-    description: "Search Firefish candidates. Use when Beverly asks about specific candidates or talent pools.",
+    description: "[FIREFISH — Ceek Talent] Search recruitment candidates. Use when Beverly asks about Ceek candidates or talent pools. NOT for Think Talent contacts — use query_odoo_contacts for that.",
     input_schema: {
       type: "object",
       properties: {
@@ -326,7 +349,7 @@ const SAM_TOOLS = [
   },
   {
     name: "search_companies_firefish",
-    description: "Search companies in Firefish. Use when Beverly asks about client companies in recruitment.",
+    description: "[FIREFISH — Ceek Talent] Search recruitment client companies. Use for Ceek client companies. NOT for Think Talent companies — use query_odoo_contacts for that.",
     input_schema: {
       type: "object",
       properties: {
@@ -349,12 +372,12 @@ const SAM_TOOLS = [
     }
   {
     name: "get_available_tags",
-    description: "List all CRM tags/labels with their colors and how many active leads use each. Use when Beverly asks 'what tags do we have', 'show me the labels', or needs to know which tags exist.",
+    description: "[ODOO CRM — Think Talent ONLY] List all CRM tags/labels with colors and lead counts. Tags exist ONLY in Odoo (Think Talent), NOT in Firefish (Ceek).",
     input_schema: { type: "object", properties: {} }
   },
   {
     name: "get_leads_by_tag",
-    description: "Get leads filtered by a specific CRM tag/label. Use when Beverly asks 'show me Agent leads', 'which leads are tagged WhatsApp', 'TTI leads report', or any request to filter by colored tag.",
+    description: "[ODOO CRM — Think Talent ONLY] Get leads filtered by a CRM tag/label. Tags ONLY exist in Odoo. Use for 'show me Agent leads', 'TTI leads', 'WhatsApp tagged'. NOT for Ceek/Firefish.",
     input_schema: {
       type: "object",
       properties: {
@@ -369,7 +392,7 @@ const SAM_TOOLS = [
   },
   {
     name: "update_lead_tags",
-    description: "Add or remove tags/labels on a CRM lead. Use when Beverly says 'tag this as Agent', 'add WhatsApp tag', 'remove TTI tag from lead X'.",
+    description: "[ODOO CRM — Think Talent ONLY] Add or remove tags on an Odoo CRM lead. Tags are a Think Talent concept. NOT available in Firefish (Ceek).",
     input_schema: {
       type: "object",
       properties: {
