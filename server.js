@@ -143,6 +143,12 @@ You have LIVE, REAL-TIME access to both business systems through tools. You are 
 
 ---
 
+**Web Search & Research:**
+- Search the web for company information, news, weather, market data
+- Browse any URL and extract its content
+- Look up companies and gather competitive intelligence
+- Use these tools proactively when Beverly asks about anything outside our internal systems
+
 ## INTENT CLASSIFICATION
 Classify Beverly's messages:
 - **pipeline_query** — asking about recruitment pipeline, candidates, placements, or Ceek activity -> use Firefish tools
@@ -178,6 +184,7 @@ const SAM_TOOLS = [
         stage: { type: "string", description: "Pipeline stage (partial match)" },
         source: { type: "string", description: "Lead source (partial match). E.g. 'Website', 'LinkedIn'" },
         type: { type: "string", description: "'lead' or 'opportunity'. Omit for both." },
+          tag: { type: "string", description: "Filter by CRM tag/label name (partial match). E.g. 'Agent', 'WhatsApp', 'Ads Web', 'TTI', 'TCN'" },
         include_closed: { type: "boolean", description: "Include won/lost. Default false." },
         limit: { type: "number", description: "Max results. Default 500." }
       }
@@ -214,6 +221,7 @@ const SAM_TOOLS = [
         type: { type: "string", description: "'lead' or 'opportunity'. Default 'lead'." },
         source: { type: "string", description: "Lead source description" }
       },
+          tags: { type: "array", items: { type: "string" }, description: "Tags to apply on creation (e.g. ['Agent', 'WhatsApp'])" },
       required: ["name"]
     }
   },
@@ -339,6 +347,85 @@ const SAM_TOOLS = [
       },
       required: ["model", "record_id", "note"]
     }
+  {
+    name: "get_available_tags",
+    description: "List all CRM tags/labels with their colors and how many active leads use each. Use when Beverly asks 'what tags do we have', 'show me the labels', or needs to know which tags exist.",
+    input_schema: { type: "object", properties: {} }
+  },
+  {
+    name: "get_leads_by_tag",
+    description: "Get leads filtered by a specific CRM tag/label. Use when Beverly asks 'show me Agent leads', 'which leads are tagged WhatsApp', 'TTI leads report', or any request to filter by colored tag.",
+    input_schema: {
+      type: "object",
+      properties: {
+        tag: { type: "string", description: "Tag name to filter by (e.g. 'Agent', 'WhatsApp', 'Ads Web', 'TTI', 'TCN')" },
+        stage: { type: "string", description: "Optional stage filter" },
+        date_from: { type: "string", description: "Optional start date (YYYY-MM-DD)" },
+        date_to: { type: "string", description: "Optional end date (YYYY-MM-DD)" },
+        limit: { type: "number", description: "Max results (default 50)" }
+      },
+      required: ["tag"]
+    }
+  },
+  {
+    name: "update_lead_tags",
+    description: "Add or remove tags/labels on a CRM lead. Use when Beverly says 'tag this as Agent', 'add WhatsApp tag', 'remove TTI tag from lead X'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        lead_id: { type: "number", description: "The Odoo lead ID" },
+        add_tags: { type: "array", items: { type: "string" }, description: "Tag names to add (creates if doesn't exist)" },
+        remove_tags: { type: "array", items: { type: "string" }, description: "Tag names to remove" }
+      },
+      required: ["lead_id"]
+    }
+  },
+  {
+    name: "web_search",
+    description: "Search the web for any information \u2014 company research, news, weather, market trends, competitor info, or anything requiring current data. Use when Beverly asks about something that isn't in Odoo or Firefish.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        num_results: { type: "number", description: "Number of results (default 5)" }
+      },
+      required: ["query"]
+    }
+  },
+  {
+    name: "browse_url",
+    description: "Read and extract text from any web page. Use when Beverly shares a URL or says 'check this page', 'read this article', 'what does this website say'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Full URL to read" }
+      },
+      required: ["url"]
+    }
+  },
+  {
+    name: "company_lookup",
+    description: "Research a company from the web. Use when Beverly says 'look up this company', 'who are they', 'tell me about [company]'. Searches web and returns a summary.",
+    input_schema: {
+      type: "object",
+      properties: {
+        company_name: { type: "string", description: "Company name" },
+        domain: { type: "string", description: "Company website domain (optional)" }
+      },
+      required: ["company_name"]
+    }
+  },
+  {
+    name: "competitor_intel",
+    description: "Gather competitive intelligence on a company. Use when Beverly asks about competitors, market positioning, or 'what do we know about [company]'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        competitor_name: { type: "string", description: "Company name to research" }
+      },
+      required: ["competitor_name"]
+    }
+  },
   }
 ];
 
@@ -776,6 +863,72 @@ async function sendTypingAction(chatId) {
 }
 
 // ─── Tool Call Handler ───────────────────────────────────────────────────────
+// ─── Web Search & Browsing ──────────────────────────────────────────────────
+
+const BRAVE_API_KEY = process.env.BRAVE_API_KEY || "";
+
+async function webSearch(query, numResults = 5) {
+  try {
+    if (BRAVE_API_KEY) {
+      const url = new URL("https://api.search.brave.com/res/v1/web/search");
+      url.searchParams.append("q", query);
+      url.searchParams.append("count", numResults);
+      const response = await fetch(url.toString(), {
+        headers: { Accept: "application/json", "X-Subscription-Token": BRAVE_API_KEY }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        return { results: (data.web?.results || []).slice(0, numResults).map(r => ({ title: r.title, url: r.url, description: r.description || "" })), source: "brave" };
+      }
+    }
+    const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const response = await fetch(ddgUrl, {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36", Accept: "text/html" }
+    });
+    if (!response.ok) throw new Error("DuckDuckGo error: " + response.status);
+    const html = await response.text();
+    const results = [];
+    const linkPattern = /<a rel="nofollow" class="result__a" href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+    const snippetPattern = /<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+    const links = []; let match;
+    while ((match = linkPattern.exec(html)) !== null) links.push({ rawUrl: match[1], title: match[2].replace(/<[^>]+>/g, "").trim() });
+    const snippets = [];
+    while ((match = snippetPattern.exec(html)) !== null) snippets.push(match[1].replace(/<[^>]+>/g, "").trim());
+    for (let i = 0; i < Math.min(links.length, numResults); i++) {
+      let resultUrl = links[i].rawUrl;
+      if (resultUrl.includes("uddg=")) {
+        try { resultUrl = decodeURIComponent(new URL(resultUrl, "https://duckduckgo.com").searchParams.get("uddg") || resultUrl); } catch {}
+      }
+      results.push({ title: links[i].title, url: resultUrl, description: snippets[i] || "" });
+    }
+    return { results: results.slice(0, numResults), source: "duckduckgo" };
+  } catch (err) {
+    console.error("Web search error:", err.message);
+    return { results: [], source: "error", error: err.message };
+  }
+}
+
+async function browseUrl(url) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36" }
+    });
+    clearTimeout(timeout);
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    const html = await response.text();
+    const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+    let content = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "").replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+      .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, "").replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, "")
+      .replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    return { url, title: titleMatch ? titleMatch[1].trim() : "", content: content.substring(0, 4000), truncated: content.length > 4000 };
+  } catch (err) {
+    return { url, title: "", content: "", error: err.message };
+  }
+}
+
 async function handleToolCall(name, input) {
   try {
     switch (name) {
@@ -791,12 +944,20 @@ async function handleToolCall(name, input) {
         if (input.stage) domain.push(["stage_id.name", "ilike", input.stage]);
         if (input.source) domain.push(["source_id.name", "ilike", input.source]);
         if (input.type) domain.push(["type", "=", input.type]);
+        if (input.tag) domain.push(["tag_ids.name", "ilike", input.tag]);
         const results = await odooRPC("crm.lead", "search_read", [domain], {
-          fields: ["id","name","partner_id","stage_id","expected_revenue","date_deadline","write_date","create_date","user_id","source_id","type","probability","email_from","phone"],
+          fields: ["id","name","partner_id","stage_id","expected_revenue","date_deadline","write_date","create_date","user_id","source_id","type","probability","email_from","phone", "tag_ids"],
           limit: input.limit || 500, order: "create_date DESC", context: { lang: "en_GB" },
         });
         if (!results.length) return "No records found matching those filters.";
         let t = "Found " + results.length + " record(s):\n\n";
+        // Resolve tag names
+        const allTagIds = [...new Set(results.flatMap(o => o.tag_ids || []))];
+        const tagMap = {};
+        if (allTagIds.length > 0) {
+          const tags = await odooRPC("crm.tag", "search_read", [[["id", "in", allTagIds]]], { fields: ["id", "name", "color"] });
+          for (const t of tags) tagMap[t.id] = t.name;
+        }
         results.forEach(o => {
           t += "- [ID:" + o.id + "] " + (o.name||"Untitled");
           if (o.partner_id?.[1]) t += " | Company: " + o.partner_id[1];
@@ -807,6 +968,8 @@ async function handleToolCall(name, input) {
           t += " | Created: " + (o.create_date||"").split(" ")[0];
           if (o.date_deadline) t += " | Deadline: " + o.date_deadline;
           t += " | Type: " + (o.type||"unknown");
+                    const tagNames = (o.tag_ids || []).map(id => tagMap[id] || "").filter(Boolean);
+          if (tagNames.length) t += " | Tags: " + tagNames.join(", ");
           t += "\n";
         });
         const total = results.reduce((s,o) => s + (parseFloat(o.expected_revenue)||0), 0);
@@ -843,6 +1006,15 @@ async function handleToolCall(name, input) {
         if (input.email) vals.email_from = input.email;
         if (input.phone) vals.phone = input.phone;
         if (input.expected_revenue) vals.expected_revenue = input.expected_revenue;
+        if (input.tags && input.tags.length) {
+          const tagIds = [];
+          for (const tagName of input.tags) {
+            const existing = await odooRPC("crm.tag", "search_read", [[["name", "=ilike", tagName]]], { fields: ["id"], limit: 1 });
+            if (existing.length) tagIds.push(existing[0].id);
+            else { let newId = await odooRPC("crm.tag", "create", [{ name: tagName }]); if (Array.isArray(newId)) newId = newId[0]; tagIds.push(newId); }
+          }
+          if (tagIds.length) vals.tag_ids = tagIds.map(id => [4, id]);
+        }
         const id = await odooRPC("crm.lead", "create", [vals]);
         return "Created new " + (vals.type) + " with ID " + id + ": " + input.name;
       }
@@ -1044,6 +1216,120 @@ t += "\n";
           body: input.note, message_type: "comment", subtype_xmlid: "mail.mt_note"
         });
         return "Note logged on " + input.model + " ID " + input.record_id + ".";
+      }
+
+      case "get_available_tags": {
+        if (!ODOO_API_KEY) return "Odoo credentials not configured.";
+        const tags = await odooRPC("crm.tag", "search_read", [[]], { fields: ["id", "name", "color"], order: "name ASC" });
+        if (!tags.length) return "No CRM tags found.";
+        const colorNames = { 0:"None", 1:"Red", 2:"Orange", 3:"Yellow", 4:"Light Blue", 5:"Purple", 6:"Pink", 7:"Blue", 8:"Dark Purple", 9:"Fuchsia", 10:"Green", 11:"Violet" };
+        let t = "CRM Tags (" + tags.length + "):\n\n";
+        for (const tag of tags) {
+          const count = await odooRPC("crm.lead", "search_count", [[["tag_ids", "in", [tag.id]], ["active", "=", true]]]);
+          t += "- " + tag.name + " (Color: " + (colorNames[tag.color] || tag.color) + ") \u2014 " + count + " active leads\n";
+        }
+        return t;
+      }
+
+      case "get_leads_by_tag": {
+        if (!ODOO_API_KEY) return "Odoo credentials not configured.";
+        const domain = [["tag_ids.name", "ilike", input.tag], ["active", "=", true]];
+        if (input.stage) domain.push(["stage_id.name", "ilike", input.stage]);
+        if (input.date_from) domain.push(["create_date", ">=", input.date_from]);
+        if (input.date_to) domain.push(["create_date", "<=", input.date_to + " 23:59:59"]);
+        const results = await odooRPC("crm.lead", "search_read", [domain], {
+          fields: ["id", "name", "partner_id", "stage_id", "expected_revenue", "user_id", "create_date", "tag_ids"],
+          limit: input.limit || 50, order: "create_date DESC"
+        });
+        if (!results.length) return "No leads found with tag '" + input.tag + "'.";
+        const allTagIds = [...new Set(results.flatMap(o => o.tag_ids || []))];
+        const tagMap = {};
+        if (allTagIds.length > 0) {
+          const tagRecords = await odooRPC("crm.tag", "search_read", [[["id", "in", allTagIds]]], { fields: ["id", "name"] });
+          for (const tr of tagRecords) tagMap[tr.id] = tr.name;
+        }
+        let t = "Leads tagged '" + input.tag + "' (" + results.length + "):\n\n";
+        results.forEach(o => {
+          t += "- [ID:" + o.id + "] " + (o.name || "Untitled");
+          if (o.partner_id?.[1]) t += " | " + o.partner_id[1];
+          t += " | Stage: " + (o.stage_id?.[1] || "Unknown");
+          t += " | EUR " + (o.expected_revenue || 0).toLocaleString("en-GB");
+          if (o.user_id?.[1]) t += " | " + o.user_id[1];
+          const tagNames = (o.tag_ids || []).map(id => tagMap[id] || "").filter(Boolean);
+          if (tagNames.length) t += " | Tags: " + tagNames.join(", ");
+          t += "\n";
+        });
+        const total = results.reduce((s, o) => s + (parseFloat(o.expected_revenue) || 0), 0);
+        t += "\nTotal value: EUR " + total.toLocaleString("en-GB");
+        return t;
+      }
+
+      case "update_lead_tags": {
+        if (!ODOO_API_KEY) return "Odoo credentials not configured.";
+        const ops = [];
+        const added = [];
+        const removed = [];
+        if (input.add_tags && input.add_tags.length) {
+          for (const tagName of input.add_tags) {
+            let existing = await odooRPC("crm.tag", "search_read", [[["name", "=ilike", tagName]]], { fields: ["id"], limit: 1 });
+            let tagId;
+            if (existing.length) { tagId = existing[0].id; }
+            else { tagId = await odooRPC("crm.tag", "create", [{ name: tagName }]); if (Array.isArray(tagId)) tagId = tagId[0]; }
+            ops.push([4, tagId]);
+            added.push(tagName);
+          }
+        }
+        if (input.remove_tags && input.remove_tags.length) {
+          for (const tagName of input.remove_tags) {
+            const existing = await odooRPC("crm.tag", "search_read", [[["name", "=ilike", tagName]]], { fields: ["id"], limit: 1 });
+            if (existing.length) { ops.push([3, existing[0].id]); removed.push(tagName); }
+          }
+        }
+        if (!ops.length) return "No tags to add or remove.";
+        await odooRPC("crm.lead", "write", [[input.lead_id], { tag_ids: ops }]);
+        let msg = "Updated tags on lead ID " + input.lead_id + ".";
+        if (added.length) msg += " Added: " + added.join(", ") + ".";
+        if (removed.length) msg += " Removed: " + removed.join(", ") + ".";
+        return msg;
+      }
+
+      case "web_search": {
+        const result = await webSearch(input.query, input.num_results || 5);
+        if (!result.results.length) return "No results found for: " + input.query;
+        let t = "Search results for '" + input.query + "' (" + result.source + "):\n\n";
+        result.results.forEach((r, i) => { t += (i+1) + ". " + r.title + "\n   " + r.url + "\n   " + r.description + "\n\n"; });
+        return t;
+      }
+
+      case "browse_url": {
+        const result = await browseUrl(input.url);
+        if (result.error) return "Could not read page: " + result.error;
+        return "Page: " + (result.title || input.url) + "\n\n" + result.content + (result.truncated ? "\n\n[Content truncated]" : "");
+      }
+
+      case "company_lookup": {
+        const query = input.domain ? input.domain + " company about" : input.company_name + " company Malta";
+        const searchResult = await webSearch(query, 5);
+        if (!searchResult.results.length) return "No information found for " + input.company_name;
+        const summary = searchResult.results.slice(0, 3).map(r => r.description).filter(Boolean).join(" | ");
+        let t = "Company: " + input.company_name + "\n\nSummary: " + (summary || searchResult.results[0].title) + "\n\nSources:\n";
+        searchResult.results.forEach(r => { t += "- " + r.title + ": " + r.url + "\n"; });
+        return t;
+      }
+
+      case "competitor_intel": {
+        const [r1, r2] = await Promise.all([
+          webSearch(input.competitor_name + " Malta services", 3),
+          webSearch(input.competitor_name + " LinkedIn", 3)
+        ]);
+        const allResults = [...r1.results, ...r2.results];
+        if (!allResults.length) return "No competitive intelligence found for " + input.competitor_name;
+        let t = "Competitive intel: " + input.competitor_name + "\n\n";
+        const seen = new Set();
+        allResults.forEach(r => {
+          if (!seen.has(r.url)) { seen.add(r.url); t += "- " + r.title + "\n  " + r.url + "\n  " + r.description + "\n\n"; }
+        });
+        return t;
       }
 
       default: return "Unknown tool: " + name;
@@ -1298,11 +1584,53 @@ app.post('/whatsapp', async (req, res) => {
       return;
     }
 
+      // Mark message as read (blue ticks)
+      try {
+        await fetch(`https://graph.facebook.com/${WA_API_VERSION}/${WA_PHONE_NUMBER_ID}/messages`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${WA_ACCESS_TOKEN}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ messaging_product: "whatsapp", status: "read", message_id: message.id })
+        });
+      } catch (e) { console.error("Read receipt error:", e.message); }
+
     if (messageType === 'text') {
       const text = message.text.body;
       console.log(`[WA] ${senderName} (${senderNumber}): ${text.substring(0, 100)}`);
       await handleMessage(`wa_${senderNumber}`, text, senderName, 'whatsapp');
-    } else if (messageType === 'audio') {
+    } else if (message.type === "audio") {
+        try {
+          const mediaId = message.audio.id;
+          const mediaInfoRes = await fetch(`https://graph.facebook.com/${WA_API_VERSION}/${mediaId}`, {
+            headers: { Authorization: `Bearer ${WA_ACCESS_TOKEN}` }
+          });
+          const mediaInfo = await mediaInfoRes.json();
+          const audioRes = await fetch(mediaInfo.url, {
+            headers: { Authorization: `Bearer ${WA_ACCESS_TOKEN}` }
+          });
+          const audioBuffer = Buffer.from(await audioRes.arrayBuffer());
+          const base64Audio = audioBuffer.toString("base64");
+          const mimeType = mediaInfo.mime_type || "audio/ogg";
+
+          const audioMessage = {
+            role: "user",
+            content: [
+              { type: "input_audio", source: { type: "base64", media_type: mimeType, data: base64Audio } },
+              { type: "text", text: "The user sent a voice message. Please listen to it and respond naturally. If they asked a question, answer it. If they gave instructions, follow them." }
+            ]
+          };
+
+          const chatId = senderNumber;
+          const history = conversationHistory.get(chatId) || [];
+          history.push(audioMessage);
+          const reply = await processMessage(history);
+          history.push({ role: "assistant", content: reply });
+          conversationHistory.set(chatId, history.slice(-20));
+          await sendWhatsApp(chatId, reply);
+        } catch (err) {
+          console.error("Voice message error:", err.message);
+          await sendWhatsApp(senderNumber, "Sorry, I couldn't process that voice message. Could you type it instead?");
+        }
+      } else 
       await sendWhatsApp(senderNumber,
         "I received a voice message but can't listen to audio yet. Could you send that as text?");
     } else if (messageType === 'image' || messageType === 'document') {
