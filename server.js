@@ -450,7 +450,6 @@ const SAM_TOOLS = [
       required: ["competitor_name"]
     }
   },
-  }
 ];
 
 // ─── HTTP Helper ──────────────────────────────────────────────────────────────
@@ -1654,9 +1653,6 @@ app.post('/whatsapp', async (req, res) => {
           console.error("Voice message error:", err.message);
           await sendWhatsApp(senderNumber, "Sorry, I couldn't process that voice message. Could you type it instead?");
         }
-      } else 
-      await sendWhatsApp(senderNumber,
-        "I received a voice message but can't listen to audio yet. Could you send that as text?");
     } else if (messageType === 'image' || messageType === 'document') {
       await sendWhatsApp(senderNumber,
         `I received a ${messageType} but can't view attachments yet. Could you describe what's in it?`);
