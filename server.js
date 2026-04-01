@@ -1,9 +1,9 @@
 /**
  * Sam — Beverly Cutajar's AI Chief of Staff
- * Telegram Bot on Railway
+ * Telegram + WhatsApp Bot on Railway
  *
  * Architecture:
- *   Telegram webhook → Express → Firefish API (live) → Odoo JSON-RPC (live) → Claude API → Telegram reply
+ *   Telegram/WhatsApp webhooks → Express → Firefish API (live) → Odoo JSON-RPC → Claude
  */
 
 import "dotenv/config";
@@ -36,6 +36,16 @@ const ALLOWED_USERS = (process.env.ALLOWED_TELEGRAM_USERS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
+// WhatsApp Cloud API config
+const WA_ACCESS_TOKEN = process.env.WA_ACCESS_TOKEN;
+const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
+const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN || 'sam_trc_whatsapp_verify';
+const WA_API_VERSION = 'v23.0';
+const BEVERLY_WA_NUMBER = process.env.BEVERLY_WA_NUMBER;
+const ALLOWED_WA_NUMBERS = (process.env.ALLOWED_WA_NUMBERS || BEVERLY_WA_NUMBER || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+const processedWAMessages = new Set();
 
 // Claude client
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -557,12 +567,12 @@ async function sendTypingAction(chatId) {
 
 const conversationHistory = {};
 
-async function handleMessage(chatId, userMessage, userName) {
-  console.log(
+async function handleMessage(chatId, userMessage, userName, channel = 'telegram') {
+  console.log(`[${channel.toUpperCase()}] ` + 
     `[${new Date().toISOString()}] Message from ${userName} (${chatId}): ${userMessage.substring(0, 100)}`
   );
 
-  await sendTypingAction(chatId);
+    if (channel === 'telegram') await sendTypingAction(chatId);
 
   const [firefishData, odooData] = await Promise.all([
     getFirefishPipeline(),
@@ -591,14 +601,55 @@ async function handleMessage(chatId, userMessage, userName) {
 
     const reply = response.content[0].text;
     conversationHistory[chatId].push({ role: "assistant", content: reply });
-    await sendTelegram(chatId, reply);
+    if (channel === 'whatsapp') {
+      const waNumber = chatId.replace('wa_', '');
+      await sendWhatsApp(waNumber, reply);
+    } else {
+      await sendTelegram(chatId, reply);
+    }
     console.log(`[${new Date().toISOString()}] Reply sent (${reply.length} chars)`);
   } catch (err) {
     console.error("Claude API error:", err);
-    await sendTelegram(
-      chatId,
-      "I'm having trouble connecting right now. Give me a moment and try again."
-    );
+    if (channel === 'whatsapp') {
+      const waNumber = chatId.replace('wa_', '');
+      await sendWhatsApp(waNumber, "I'm having trouble connecting right now. Give me a moment and try again.");
+    } else {
+      await sendTelegram(chatId, "I'm having trouble connecting right now. Give me a moment and try again.");
+    }
+  }
+}
+
+
+// ─── WhatsApp Sending ─────────────────────────────────────
+async function sendWhatsApp(to, text) {
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > 0) {
+    chunks.push(remaining.substring(0, 4000));
+    remaining = remaining.substring(4000);
+  }
+  for (const chunk of chunks) {
+    try {
+      await fetchJSON(
+        `https://graph.facebook.com/${WA_API_VERSION}/${WA_PHONE_NUMBER_ID}/messages`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${WA_ACCESS_TOKEN}`,
+          },
+          body: JSON.stringify({
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to: to,
+            type: 'text',
+            text: { body: chunk },
+          }),
+        }
+      );
+    } catch (err) {
+      console.error('WhatsApp send error:', err.message);
+    }
   }
 }
 
@@ -607,8 +658,8 @@ async function handleMessage(chatId, userMessage, userName) {
 app.get("/", (req, res) => {
   res.json({
     status: "ok",
-    bot: "Sam TRC",
-    version: "1.0.0",
+    bot: "Sam TRC (Telegram + WhatsApp)",
+    version: "2.0.0",
     uptime: process.uptime(),
   });
 });
@@ -636,7 +687,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    await handleMessage(chatId, text, userName);
+    await handleMessage(chatId, text, userName, 'telegram');
   } catch (err) {
     console.error("Webhook error:", err);
   }
@@ -662,6 +713,74 @@ app.get("/set-webhook", async (req, res) => {
     res.json({ ok: true, webhook: webhookUrl, result });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+
+// ─── WhatsApp Webhook Verification (GET) ────────────────────────────────────────────────────────────
+app.get('/whatsapp', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === WA_VERIFY_TOKEN) {
+    console.log('WhatsApp webhook verified');
+    res.status(200).send(challenge);
+  } else {
+    console.log('WhatsApp webhook verification failed');
+    res.sendStatus(403);
+  }
+});
+
+// ─── WhatsApp Incoming Messages (POST) ────────────────────────────────────────────────────────────────
+const processedWaMessages = new Set();
+
+app.post('/whatsapp', async (req, res) => {
+  res.sendStatus(200);
+
+  try {
+    const body = req.body;
+    if (body.object !== 'whatsapp_business_account') return;
+
+    const entry = body.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const value = changes?.value;
+
+    if (!value?.messages || value.statuses) return;
+
+    const message = value.messages[0];
+    const contact = value.contacts?.[0];
+
+    if (processedWaMessages.has(message.id)) return;
+    processedWaMessages.add(message.id);
+    if (processedWaMessages.size > 1000) {
+      const arr = [...processedWaMessages];
+      arr.slice(0, 500).forEach(id => processedWaMessages.delete(id));
+    }
+
+    const senderNumber = message.from;
+    const senderName = contact?.profile?.name || 'Unknown';
+    const messageType = message.type;
+
+    if (ALLOWED_WA_NUMBERS.length > 0 && !ALLOWED_WA_NUMBERS.includes(senderNumber)) {
+      console.log(`WhatsApp: blocked message from ${senderNumber} (${senderName})`);
+      await sendWhatsApp(senderNumber, 'This bot is restricted to authorised users.');
+      return;
+    }
+
+    if (messageType === 'text') {
+      const text = message.text.body;
+      console.log(`[WA] ${senderName} (${senderNumber}): ${text.substring(0, 100)}`);
+      await handleMessage(`wa_${senderNumber}`, text, senderName, 'whatsapp');
+    } else if (messageType === 'audio') {
+      await sendWhatsApp(senderNumber,
+        "I received a voice message but can't listen to audio yet. Could you send that as text?");
+    } else if (messageType === 'image' || messageType === 'document') {
+      await sendWhatsApp(senderNumber,
+        `I received a ${messageType} but can't view attachments yet. Could you describe what's in it?`);
+    }
+  } catch (err) {
+    console.error('WhatsApp webhook error:', err);
   }
 });
 
@@ -804,4 +923,5 @@ app.listen(PORT, () => {
   console.log(`Odoo: ${ODOO_API_KEY ? "configured" : "NOT SET"} (db=${ODOO_DB}, login=${ODOO_LOGIN || "not set"})`);
   console.log(`Claude: ${ANTHROPIC_API_KEY ? "configured" : "NOT SET"}`);
   console.log(`Telegram: ${TELEGRAM_TOKEN ? "configured" : "NOT SET"}`);
+  console.log(`WhatsApp: ${WA_ACCESS_TOKEN ? 'configured' : 'NOT SET'} (Phone ID: ${WA_PHONE_NUMBER_ID || 'NOT SET'})`);
 });
