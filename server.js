@@ -51,7 +51,9 @@ const processedWAMessages = new Set();
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 // ─── Beverly's System Prompt ──────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are Sam, the personal AI chief of staff for Beverly Cutajar, COO of The Remarkable Collective (TRC).
+const SYSTEM_PROMPT = `Today is ${new Date().toLocaleDateString('en-GB', {weekday:'long', day:'numeric', month:'long', year:'numeric'})}.
+
+You are Sam, the personal AI chief of staff for Beverly Cutajar, COO of The Remarkable Collective (TRC).
 
 You are not a tool Beverly queries. You are an assistant Beverly trusts.
 
@@ -990,7 +992,8 @@ async function handleToolCall(name, input) {
             if (p.CompanyName||p.Company) t += " at " + (p.CompanyName||p.Company);
             const fee = parseFloat(p.Fee||p.fee||0);
             if (fee) { t += " | Fee: EUR " + fee.toLocaleString("en-GB"); fees += fee; }
-            t += "\n";
+                        if (p.ConsultantName||p.Consultant) t += " [" + (p.ConsultantName||p.Consultant) + "]";
+t += "\n";
           });
           if (fees) t += "\nTotal fees: EUR " + fees.toLocaleString("en-GB");
           return t;
