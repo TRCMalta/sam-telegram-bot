@@ -1635,39 +1635,78 @@ app.post('/whatsapp', async (req, res) => {
       console.log(`[WA] ${senderName} (${senderNumber}): ${text.substring(0, 100)}`);
       await handleMessage(`wa_${senderNumber}`, text, senderName, 'whatsapp');
     } else if (message.type === "audio") {
+        // Voice message - download, transcribe with Groq Whisper, feed text to Claude
         try {
           const mediaId = message.audio.id;
+          const mimeType = message.audio.mime_type || "audio/ogg";
+          console.log(`[VOICE] Downloading voice message ${mediaId} (${mimeType}) from ${senderName}`);
+
+          if (!process.env.GROQ_API_KEY) {
+            console.error("[VOICE] GROQ_API_KEY not set");
+            await sendWhatsApp(senderNumber, "Voice messages are not fully configured yet. Please send your message as text for now.");
+            return;
+          }
+
           const mediaInfoRes = await fetch(`https://graph.facebook.com/${WA_API_VERSION}/${mediaId}`, {
-            headers: { Authorization: `Bearer ${WA_ACCESS_TOKEN}` }
+            headers: { Authorization: `Bearer ${WA_ACCESS_TOKEN}` },
           });
           const mediaInfo = await mediaInfoRes.json();
+
+          if (!mediaInfo.url) {
+            console.error("[VOICE] No download URL returned:", JSON.stringify(mediaInfo));
+            await sendWhatsApp(senderNumber, "Sorry, I could not download that voice message. Could you try again or type your message instead?");
+            return;
+          }
+
           const audioRes = await fetch(mediaInfo.url, {
-            headers: { Authorization: `Bearer ${WA_ACCESS_TOKEN}` }
+            headers: { Authorization: `Bearer ${WA_ACCESS_TOKEN}` },
           });
+
+          if (!audioRes.ok) {
+            console.error(`[VOICE] Audio download failed: ${audioRes.status}`);
+            await sendWhatsApp(senderNumber, "Sorry, I could not process that voice message. Please try again or send a text message.");
+            return;
+          }
+
           const audioBuffer = Buffer.from(await audioRes.arrayBuffer());
-          const base64Audio = audioBuffer.toString("base64");
-          const mimeType = mediaInfo.mime_type || "audio/ogg";
+          console.log(`[VOICE] Downloaded ${(audioBuffer.length / 1024).toFixed(1)}KB audio from ${senderName}`);
 
-          const audioMessage = {
-            role: "user",
-            content: [
-              { type: "input_audio", source: { type: "base64", media_type: mimeType, data: base64Audio } },
-              { type: "text", text: "The user sent a voice message. Please listen to it and respond naturally. If they asked a question, answer it. If they gave instructions, follow them." }
-            ]
-          };
+          const ext = mimeType.includes("ogg") ? "ogg" : mimeType.includes("mp4") ? "m4a" : "ogg";
+          const formData = new FormData();
+          formData.append("file", new Blob([audioBuffer], { type: mimeType }), `voice.${ext}`);
+          formData.append("model", "whisper-large-v3-turbo");
+          formData.append("language", "en");
+          formData.append("response_format", "text");
 
-          const chatId = senderNumber;
-          const history = conversationHistory.get(chatId) || [];
-          history.push(audioMessage);
-          const reply = await processMessage(history);
-          history.push({ role: "assistant", content: reply });
-          conversationHistory.set(chatId, history.slice(-20));
-          await sendWhatsApp(chatId, reply);
+          const transcribeRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+            body: formData,
+          });
+
+          if (!transcribeRes.ok) {
+            const errBody = await transcribeRes.text();
+            console.error(`[VOICE] Groq transcription failed: ${transcribeRes.status} - ${errBody}`);
+            await sendWhatsApp(senderNumber, "Sorry, I could not understand that voice message. Could you try again or type your message?");
+            return;
+          }
+
+          const transcript = (await transcribeRes.text()).trim();
+          console.log(`[VOICE] Transcribed (${transcript.length} chars): "${transcript.substring(0, 100)}..."`);
+
+          if (!transcript || transcript.length < 2) {
+            await sendWhatsApp(senderNumber, "I received your voice message but could not make out the words. Could you try again or type your message?");
+            return;
+          }
+
+          console.log(`[WA] ${senderName} (${senderNumber}) [voice]: ${transcript.substring(0, 100)}`);
+          await handleMessage(`wa_${senderNumber}`, `[Voice message] ${transcript}`, senderName, 'whatsapp');
+
         } catch (err) {
-          console.error("Voice message error:", err.message);
-          await sendWhatsApp(senderNumber, "Sorry, I couldn't process that voice message. Could you type it instead?");
+          console.error("[VOICE] Error processing voice message:", err.message);
+          await sendWhatsApp(senderNumber, "Sorry, I had trouble processing that voice message. Could you type your message instead?");
         }
-    } else if (messageType === 'image' || messageType === 'document') {
+      } else if (messageType === 'image' || messageType === 'document') {
       await sendWhatsApp(senderNumber,
         `I received a ${messageType} but can't view attachments yet. Could you describe what's in it?`);
     }
