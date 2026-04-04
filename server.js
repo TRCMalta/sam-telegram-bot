@@ -65,7 +65,8 @@ function getMaltaGreetingHint() {
   return "evening";
 }
 
-const SYSTEM_PROMPT = `Today's date is ${getMaltaDate()}. The current time in Malta is ${getMaltaTime()} (${getMaltaGreetingHint()}). Use this to greet Beverly appropriately — "Good morning", "Good afternoon", or "Good evening". NEVER greet with the wrong time of day.
+function buildSystemPrompt() {
+  return `Today's date is ${getMaltaDate()}. The current time in Malta is ${getMaltaTime()} (${getMaltaGreetingHint()}). Use this to greet Beverly appropriately — "Good morning", "Good afternoon", or "Good evening". NEVER greet with the wrong time of day.
 
 You are Sam, the personal AI chief of staff for Beverly Cutajar, COO of The Remarkable Collective (TRC).
 
@@ -313,6 +314,7 @@ Classify Beverly's messages:
 4. Always lead with the answer
 5. Never make Beverly feel like she is talking to software
 6. When asked about a company, ALWAYS search for it — never assume it does not exist`;
+}
 
 // ─── Sam's Tools (Claude Tool Use) ──────────────────────────────────────────
 const SAM_TOOLS = [
@@ -706,10 +708,13 @@ async function getFirefishPipeline() {
         const disc = j.PrimaryDiscipline || j.Discipline || "";
         const stage = j.Status || j.Stage || "";
         const owner = j.ConsultantName || j.Consultant || j.OwnerName || "";
+        const candidates = j.CandidatesInProcess || j.candidatesInProcess || 0;
+        const positions = j.PositionsTotal || j.positionsTotal || 0;
         ctx += `- ${title}`;
         if (company) ctx += ` at ${company}`;
         if (disc) ctx += ` (${disc})`;
         if (stage) ctx += ` — ${stage}`;
+        ctx += ` | Candidates: ${candidates}/${positions} positions`;
         if (owner) ctx += ` [${owner}]`;
         ctx += "\n";
       });
@@ -846,7 +851,7 @@ async function getOdooPipeline() {
           "create_date",
           "user_id",
         ],
-        limit: 2000,
+        limit: 200,
         order: "create_date DESC",
         context: { lang: "en_GB" },
       }
@@ -1092,7 +1097,7 @@ async function handleToolCall(name, input) {
         if (input.tag) domain.push(["tag_ids.name", "ilike", input.tag]);
         const results = await odooRPC("crm.lead", "search_read", [domain], {
           fields: ["id","name","partner_id","stage_id","expected_revenue","date_deadline","write_date","create_date","user_id","source_id","type","probability","email_from","phone", "tag_ids"],
-          limit: input.limit || 500, order: "create_date DESC", context: { lang: "en_GB" },
+          limit: input.limit || 50, order: "create_date DESC", context: { lang: "en_GB" },
         });
         if (!results.length) return "No records found matching those filters.";
         let t = "Found " + results.length + " record(s):\n\n";
@@ -1580,7 +1585,7 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
     let response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 4096,
-      system: SYSTEM_PROMPT,
+      system: buildSystemPrompt(),
       tools: SAM_TOOLS,
       messages
     });
@@ -1619,7 +1624,7 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       response = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 4096,
-        system: SYSTEM_PROMPT,
+        system: buildSystemPrompt(),
         tools: SAM_TOOLS,
         messages
       });
@@ -1633,7 +1638,7 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       response = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 4096,
-        system: SYSTEM_PROMPT,
+        system: buildSystemPrompt(),
         messages
       });
     }
@@ -1882,6 +1887,7 @@ app.post('/whatsapp', async (req, res) => {
 
           const audioRes = await fetch(mediaInfo.url, {
             headers: { Authorization: `Bearer ${WA_ACCESS_TOKEN}` },
+            signal: AbortSignal.timeout(30000), // 30s timeout
           });
 
           if (!audioRes.ok) {
@@ -1904,6 +1910,7 @@ app.post('/whatsapp', async (req, res) => {
             method: "POST",
             headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
             body: formData,
+            signal: AbortSignal.timeout(30000), // 30s timeout
           });
 
           if (!transcribeRes.ok) {
