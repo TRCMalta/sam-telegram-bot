@@ -1548,7 +1548,7 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
     // First Claude call WITH tools
     let response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 2048,
+      max_tokens: 4096,
       system: SYSTEM_PROMPT,
       tools: SAM_TOOLS,
       messages
@@ -1556,7 +1556,7 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
 
     // Tool-use loop - let Claude call tools and get results
     let iterations = 0;
-    while (response.stop_reason === 'tool_use' && iterations < 5) {
+    while (response.stop_reason === 'tool_use' && iterations < 10) {
       iterations++;
       console.log(`Tool-use iteration ${iterations}`);
 
@@ -1587,9 +1587,22 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
 
       response = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 2048,
+        max_tokens: 4096,
         system: SYSTEM_PROMPT,
         tools: SAM_TOOLS,
+        messages
+      });
+    }
+
+    // If we hit max iterations and Claude still wants tools, make one final call WITHOUT tools to force a text summary
+    if (response.stop_reason === 'tool_use' && iterations >= 10) {
+      console.log('[MEMORY] Hit max tool iterations, forcing text-only response');
+      messages.push({ role: 'assistant', content: response.content });
+      messages.push({ role: 'user', content: [{ type: 'text', text: 'Please summarise what you found so far and give Beverly the best answer you can with the information gathered. Do not call any more tools.' }] });
+      response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        system: SYSTEM_PROMPT,
         messages
       });
     }
