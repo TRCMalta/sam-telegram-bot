@@ -1487,7 +1487,47 @@ t += "\n";
 
 // ─── Core Message Handler ─────────────────────────────────────────────────────
 
+// --- Conversation Memory ---
+// Stores { messages: [...], lastActivity: Date.now() } per chatId
 const conversationHistory = {};
+const MAX_HISTORY_TURNS = 20; // Keep last 20 user+assistant pairs
+const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 min inactivity = fresh convo
+
+function getConversationHistory(chatId) {
+  const convo = conversationHistory[chatId];
+  if (!convo) return [];
+  // Expire stale conversations
+  if (Date.now() - convo.lastActivity > CONVERSATION_TIMEOUT_MS) {
+    delete conversationHistory[chatId];
+    console.log(`[MEMORY] Conversation expired for ${chatId}`);
+    return [];
+  }
+  return convo.messages;
+}
+
+function addToConversationHistory(chatId, role, content) {
+  if (!conversationHistory[chatId]) {
+    conversationHistory[chatId] = { messages: [], lastActivity: Date.now() };
+  }
+  conversationHistory[chatId].lastActivity = Date.now();
+  conversationHistory[chatId].messages.push({ role, content });
+  // Trim to max turns (each turn = 1 user + 1 assistant = 2 entries)
+  const maxEntries = MAX_HISTORY_TURNS * 2;
+  if (conversationHistory[chatId].messages.length > maxEntries) {
+    conversationHistory[chatId].messages = conversationHistory[chatId].messages.slice(-maxEntries);
+  }
+}
+
+// Clean up expired conversations every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const chatId of Object.keys(conversationHistory)) {
+    if (now - conversationHistory[chatId].lastActivity > CONVERSATION_TIMEOUT_MS) {
+      delete conversationHistory[chatId];
+      console.log(`[MEMORY] Cleaned up expired convo: ${chatId}`);
+    }
+  }
+}, 10 * 60 * 1000);
 
 async function handleMessage(chatId, userMessage, userName, channel = 'telegram') {
   console.log(`[${channel.toUpperCase()}] Message from ${userName} (${chatId}): ${userMessage}`);
@@ -1500,7 +1540,10 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
   try {
     // Build messages array - NO pre-fetching of pipeline data
     // Sam will use tools to query data on-demand
-    const messages = [{ role: 'user', content: userMessage }];
+    // Load conversation history for this chat
+    const previousMessages = getConversationHistory(chatId);
+    const messages = [...previousMessages, { role: 'user', content: userMessage }];
+    console.log(`[MEMORY] ${chatId}: ${previousMessages.length} history entries + new message`);
 
     // First Claude call WITH tools
     let response = await anthropic.messages.create({
@@ -1564,6 +1607,12 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
     }
 
     // Send via appropriate channel
+    // Save conversation turns to history
+    addToConversationHistory(chatId, 'user', userMessage);
+    if (reply) {
+      addToConversationHistory(chatId, 'assistant', reply);
+    }
+
     if (channel === 'whatsapp') {
       await sendWhatsApp(chatId, reply);
     } else {
