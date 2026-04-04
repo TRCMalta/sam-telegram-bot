@@ -1492,6 +1492,7 @@ t += "\n";
 const conversationHistory = {};
 const MAX_HISTORY_TURNS = 20; // Keep last 20 user+assistant pairs
 const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 min inactivity = fresh convo
+const MAX_CONCURRENT_CONVERSATIONS = 100; // Hard cap on total stored conversations
 
 function getConversationHistory(chatId) {
   const convo = conversationHistory[chatId];
@@ -1502,11 +1503,41 @@ function getConversationHistory(chatId) {
     console.log(`[MEMORY] Conversation expired for ${chatId}`);
     return [];
   }
+  // Trim history if total content exceeds ~50K chars (~12K tokens) to avoid context overflow
+  let totalChars = 0;
+  for (const msg of convo.messages) {
+    totalChars += typeof msg.content === 'string' ? msg.content.length : JSON.stringify(msg.content).length;
+  }
+  if (totalChars > 50000) {
+    // Keep trimming oldest pairs until under limit
+    while (totalChars > 50000 && convo.messages.length > 2) {
+      const removed = convo.messages.shift();
+      totalChars -= typeof removed.content === 'string' ? removed.content.length : JSON.stringify(removed.content).length;
+      if (convo.messages.length > 0 && convo.messages[0].role === 'assistant') {
+        const removed2 = convo.messages.shift();
+        totalChars -= typeof removed2.content === 'string' ? removed2.content.length : JSON.stringify(removed2.content).length;
+      }
+    }
+    console.log(`[MEMORY] Trimmed history for ${chatId} to ${totalChars} chars (${convo.messages.length} entries)`);
+  }
   return convo.messages;
 }
 
 function addToConversationHistory(chatId, role, content) {
   if (!conversationHistory[chatId]) {
+    // Evict oldest conversation if at capacity
+    const keys = Object.keys(conversationHistory);
+    if (keys.length >= MAX_CONCURRENT_CONVERSATIONS) {
+      let oldestKey = keys[0], oldestTime = conversationHistory[keys[0]].lastActivity;
+      for (const k of keys) {
+        if (conversationHistory[k].lastActivity < oldestTime) {
+          oldestKey = k;
+          oldestTime = conversationHistory[k].lastActivity;
+        }
+      }
+      delete conversationHistory[oldestKey];
+      console.log(`[MEMORY] Evicted oldest conversation: ${oldestKey}`);
+    }
     conversationHistory[chatId] = { messages: [], lastActivity: Date.now() };
   }
   conversationHistory[chatId].lastActivity = Date.now();
@@ -1632,12 +1663,28 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       await sendTelegram(chatId, reply);
     }
   } catch (err) {
-    console.error('handleMessage error:', err);
-    const errorMsg = 'Sorry, I encountered an error processing your request. Please try again.';
-    if (channel === 'whatsapp') {
-      await sendWhatsApp(chatId, errorMsg);
+    console.error(`[ERROR] handleMessage [${channel}] ${chatId}:`, err?.status || err?.code || '', err?.message || err);
+    let errorMsg;
+    if (err?.status === 429) {
+      errorMsg = "I'm being rate-limited right now. Give me 30 seconds and try again.";
+    } else if (err?.status === 529 || err?.status === 503) {
+      errorMsg = "Claude is temporarily overloaded. Try again in a minute.";
+    } else if (err?.status === 401) {
+      errorMsg = "There's an authentication issue with my AI service. Jonathan will need to check the API key.";
+    } else if (err?.message?.includes('context') || err?.message?.includes('token')) {
+      errorMsg = "That conversation got too long for me to process. Let me start fresh \u2014 please ask your question again.";
+      delete conversationHistory[chatId]; // Clear history to recover
     } else {
-      await sendTelegram(chatId, errorMsg);
+      errorMsg = "Sorry, I hit an error processing that. Please try again.";
+    }
+    try {
+      if (channel === 'whatsapp') {
+        await sendWhatsApp(chatId, errorMsg);
+      } else {
+        await sendTelegram(chatId, errorMsg);
+      }
+    } catch (sendErr) {
+      console.error(`[ERROR] Failed to send error message to ${chatId}:`, sendErr?.message || sendErr);
     }
   }
 }
@@ -1756,7 +1803,16 @@ app.get('/whatsapp', (req, res) => {
 });
 
 // ─── WhatsApp Incoming Messages (POST) ────────────────────────────────────────────────────────────────
-const processedWaMessages = new Set();
+const processedWaMessages = new Map(); // messageId -> timestamp
+// Clean up old message IDs every 5 minutes (keep last 10 min only)
+setInterval(() => {
+  const cutoff = Date.now() - 10 * 60 * 1000;
+  let cleaned = 0;
+  for (const [id, ts] of processedWaMessages) {
+    if (ts < cutoff) { processedWaMessages.delete(id); cleaned++; }
+  }
+  if (cleaned > 0) console.log(`[DEDUP] Cleaned ${cleaned} expired message IDs, ${processedWaMessages.size} remaining`);
+}, 5 * 60 * 1000);
 
 app.post('/whatsapp', async (req, res) => {
   res.sendStatus(200);
@@ -1775,11 +1831,7 @@ app.post('/whatsapp', async (req, res) => {
     const contact = value.contacts?.[0];
 
     if (processedWaMessages.has(message.id)) return;
-    processedWaMessages.add(message.id);
-    if (processedWaMessages.size > 1000) {
-      const arr = [...processedWaMessages];
-      arr.slice(0, 500).forEach(id => processedWaMessages.delete(id));
-    }
+    processedWaMessages.set(message.id, Date.now());
 
     const senderNumber = message.from;
     const senderName = contact?.profile?.name || 'Unknown';
