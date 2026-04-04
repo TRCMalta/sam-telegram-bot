@@ -668,9 +668,19 @@ async function firefishAuth() {
 
 async function firefishGet(path) {
   const token = await firefishAuth();
-  return fetchJSON(`https://api.firefishsoftware.com/api/v1.1${path}`, {
+  const result = await fetchJSON(`https://api.firefishsoftware.com/api/v1.1${path}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
+  // Log unexpected response shapes for debugging
+  if (result && typeof result === 'object' && !Array.isArray(result) && !result.Results && !result.data) {
+    const keys = Object.keys(result).slice(0, 10).join(', ');
+    console.log(`Firefish response for ${path}: unexpected shape. Keys: [${keys}]`);
+  }
+  if (typeof result === 'string') {
+    console.error(`Firefish returned string for ${path}: ${result.substring(0, 200)}`);
+    throw new Error('Firefish returned non-JSON response');
+  }
+  return result;
 }
 
 async function getFirefishPipeline() {
@@ -753,13 +763,16 @@ async function getFirefishPipeline() {
 // ─── Odoo JSON-RPC Client ─────────────────────────────────────────────────────
 
 let odooUidCache = null;
+let odooUidCacheTime = 0;
+const ODOO_UID_TTL = 4 * 60 * 60 * 1000; // 4 hours
 
 async function odooGetUid() {
-  if (odooUidCache) return odooUidCache;
+  if (odooUidCache && (Date.now() - odooUidCacheTime) < ODOO_UID_TTL) return odooUidCache;
 
   // If UID is explicitly set, use it
   if (process.env.ODOO_UID) {
     odooUidCache = parseInt(process.env.ODOO_UID);
+    odooUidCacheTime = Date.now();
     console.log(`Odoo: using explicit UID ${odooUidCache}`);
     return odooUidCache;
   }
@@ -785,6 +798,7 @@ async function odooGetUid() {
       });
       if (authResult.result) {
         odooUidCache = authResult.result;
+        odooUidCacheTime = Date.now();
         console.log(`Odoo: authenticated successfully, UID = ${odooUidCache}`);
         return odooUidCache;
       } else {
@@ -798,6 +812,7 @@ async function odooGetUid() {
   // Fallback to UID 2 (default admin)
   console.log("Odoo: falling back to default UID 2");
   odooUidCache = 2;
+  odooUidCacheTime = Date.now();
   return odooUidCache;
 }
 
@@ -824,6 +839,7 @@ async function odooRPC(model, method, domain, kwargs = {}) {
 
   if (result.error) {
     const errMsg = result.error.data?.message || result.error.message || JSON.stringify(result.error);
+    if (errMsg.toLowerCase().includes("access denied") || errMsg.toLowerCase().includes("session")) { odooUidCache = null; odooUidCacheTime = 0; console.log("Odoo: cleared UID cache due to auth error"); }
     console.error(`Odoo RPC error: ${errMsg}`);
     throw new Error(errMsg);
   }
