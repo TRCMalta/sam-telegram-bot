@@ -262,6 +262,8 @@ You have LIVE, REAL-TIME access to both business systems through tools. You are 
 **Microsoft 365 (Beverly's Email & Calendar) — Read Only:**
 - check_beverly_email — Check Beverly's inbox (recent, search, unread)
 - check_beverly_calendar — Check Beverly's schedule and meetings
+- send_beverly_email — Send emails from Beverly\'s account
+- create_beverly_calendar_event — Create meetings and calendar invites for Beverly
 
 
 **When Beverly asks about specific data:**
@@ -270,7 +272,7 @@ You have LIVE, REAL-TIME access to both business systems through tools. You are 
 3. If a query returns no results, say so clearly and suggest alternative searches.
 4. Cross-reference both systems when relevant — a company could appear in Odoo AND Firefish.
 5. For general "how are things" questions, use get_pipeline_summary for a quick overview.
-6. When Beverly asks about her emails, meetings, schedule, or who contacted her — use check_beverly_email or check_beverly_calendar immediately. They are always current.
+6. When Beverly asks about her emails, meetings, or schedule — use the email and calendar tools immediately. You can READ her emails and calendar, SEND emails on her behalf, and CREATE calendar events/meeting invites. Always confirm key details (recipients, time, subject) before sending or scheduling.
 7. You have NO artificial limits. Query as much data as you need.
 
 ---
@@ -609,6 +611,38 @@ const SAM_TOOLS = [
       }
     }
   },
+  {
+    name: "send_beverly_email",
+    description: "Send an email from Beverly\'s account. Use when Beverly asks to write, send, reply to, or forward an email.",
+    input_schema: {
+      type: "object",
+      properties: {
+        to: { type: "array", items: { type: "string" }, description: "Recipient email addresses" },
+        cc: { type: "array", items: { type: "string" }, description: "CC email addresses (optional)" },
+        subject: { type: "string", description: "Email subject line" },
+        body: { type: "string", description: "Email body in HTML. Use <br> for line breaks, <b> for bold." },
+        importance: { type: "string", enum: ["low", "normal", "high"], description: "Email importance (default: normal)" }
+      },
+      required: ["to", "subject", "body"]
+    }
+  },
+  {
+    name: "create_beverly_calendar_event",
+    description: "Create a calendar event or meeting invite on Beverly\'s calendar. Use when Beverly asks to schedule a meeting, block time, or send a calendar invite.",
+    input_schema: {
+      type: "object",
+      properties: {
+        subject: { type: "string", description: "Event title" },
+        start: { type: "string", description: "Start time in ISO 8601 (e.g. 2026-04-07T10:00:00)" },
+        end: { type: "string", description: "End time in ISO 8601 (e.g. 2026-04-07T11:00:00)" },
+        attendees: { type: "array", items: { type: "string" }, description: "Attendee email addresses (they receive an invite)" },
+        location: { type: "string", description: "Location or meeting room" },
+        body: { type: "string", description: "Event description/notes in HTML" },
+        isOnlineMeeting: { type: "boolean", description: "Create a Teams meeting link (default: false)" }
+      },
+      required: ["subject", "start", "end"]
+    }
+  },
 ];
 
 // ─── HTTP Helper ──────────────────────────────────────────────────────────────
@@ -707,6 +741,22 @@ async function msGraphGet(path) {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
+
+async function msGraphPost(path, body) {
+  const token = await msGraphAuth();
+  const res = await fetch("https://graph.microsoft.com/v1.0" + path, {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer " + token,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 202 || res.status === 204) return { success: true };
+  const text = await res.text();
+  try { return JSON.parse(text); } catch { return { status: res.status, body: text }; }
+}
+
 
 async function firefishAuth() {
   if (firefishTokenCache.token && Date.now() < firefishTokenCache.expiresAt) {
@@ -1542,6 +1592,64 @@ t += "\n";
         } catch (e) {
           if (e.message.includes("not configured")) return "Microsoft 365 credentials not configured.";
           return "Microsoft Graph error: " + e.message;
+        }
+      }
+
+      case "send_beverly_email": {
+        try {
+          if (!MS_CLIENT_ID) return "Microsoft 365 credentials not configured.";
+          const { to, cc, subject, body, importance } = input;
+          if (!to || !to.length || !subject || !body) return "Missing required fields: to, subject, body";
+          const message = {
+            subject,
+            body: { contentType: "HTML", content: body },
+            toRecipients: to.map(e => ({ emailAddress: { address: e } })),
+            importance: importance || "normal",
+          };
+          if (cc && cc.length) {
+            message.ccRecipients = cc.map(e => ({ emailAddress: { address: e } }));
+          }
+          const sendResult = await msGraphPost("/users/" + BEVERLY_EMAIL + "/sendMail", { message, saveToSentItems: true });
+          if (sendResult.success) {
+            const recipientList = to.join(", ") + (cc && cc.length ? " (cc: " + cc.join(", ") + ")" : "");
+            return "Email sent successfully from Beverly to " + recipientList + ". Subject: " + JSON.stringify(subject);
+          } else {
+            return "Failed to send email: " + JSON.stringify(sendResult).substring(0, 500);
+          }
+        } catch (err) {
+          return "Email send error: " + err.message;
+        }
+      }
+
+      case "create_beverly_calendar_event": {
+        try {
+          if (!MS_CLIENT_ID) return "Microsoft 365 credentials not configured.";
+          const { subject, start, end, attendees, location, body, isOnlineMeeting } = input;
+          if (!subject || !start || !end) return "Missing required fields: subject, start, end";
+          const event = {
+            subject,
+            start: { dateTime: start, timeZone: "Europe/Malta" },
+            end: { dateTime: end, timeZone: "Europe/Malta" },
+            isOnlineMeeting: isOnlineMeeting || false,
+          };
+          if (body) event.body = { contentType: "HTML", content: body };
+          if (location) event.location = { displayName: location };
+          if (attendees && attendees.length) {
+            event.attendees = attendees.map(e => ({
+              emailAddress: { address: e, name: e },
+              type: "required"
+            }));
+          }
+          const result = await msGraphPost("/users/" + BEVERLY_EMAIL + "/events", event);
+          if (result.id) {
+            const startFormatted = new Date(start).toLocaleString("en-GB", { timeZone: "Europe/Malta", dateStyle: "medium", timeStyle: "short" });
+            const attendeeList = attendees && attendees.length ? " Invites sent to: " + attendees.join(", ") : "";
+            return "Calendar event created: " + JSON.stringify(subject) + " on " + startFormatted + "." + attendeeList;
+          } else {
+            return "Failed to create event: " + JSON.stringify(result).substring(0, 500);
+          }
+        } catch (err) {
+          return "Calendar event error: " + err.message;
         }
       }
 
