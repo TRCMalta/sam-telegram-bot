@@ -809,11 +809,9 @@ async function odooGetUid() {
     }
   }
 
-  // Fallback to UID 2 (default admin)
-  console.log("Odoo: falling back to default UID 2");
-  odooUidCache = 2;
-  odooUidCacheTime = Date.now();
-  return odooUidCache;
+  // Auth failed — do NOT fallback to UID 2 (admin), fail safely
+  console.error("Odoo: authentication failed, no valid UID. Check ODOO_UID, ODOO_LOGIN, and ODOO_API_KEY env vars.");
+  throw new Error("Odoo authentication failed — check credentials");
 }
 
 async function odooRPC(model, method, domain, kwargs = {}) {
@@ -998,18 +996,35 @@ async function sendTelegram(chatId, text) {
   }
 
   for (const chunk of chunks) {
-    await fetchJSON(
-      `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: chunk,
-          parse_mode: "Markdown",
-        }),
+    try {
+      await fetchJSON(
+        `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: chunk,
+            parse_mode: "Markdown",
+          }),
+        }
+      );
+    } catch (err) {
+      console.error(`Telegram send error (chat ${chatId}): ${err.message}`);
+      // Try again without Markdown parse mode in case of formatting error
+      try {
+        await fetchJSON(
+          `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: chatId, text: chunk }),
+          }
+        );
+      } catch (retryErr) {
+        console.error(`Telegram retry also failed: ${retryErr.message}`);
       }
-    );
+    }
   }
 }
 
@@ -1145,6 +1160,7 @@ async function handleToolCall(name, input) {
 
       case "update_crm_lead": {
         if (!ODOO_API_KEY) return "Odoo credentials not configured.";
+        if (!input.lead_id || !Number.isInteger(input.lead_id)) return "Invalid lead ID — must be an integer.";
         const vals = {};
         if (input.expected_revenue !== undefined) vals.expected_revenue = input.expected_revenue;
         if (input.date_deadline) vals.date_deadline = input.date_deadline;
@@ -1316,7 +1332,7 @@ async function handleToolCall(name, input) {
 
       case "search_placements": {
         try {
-          const days = input.days_back || 90;
+          const days = Math.max(1, Math.min(parseInt(input.days_back) || 90, 365));
           const now = new Date(); const ago = new Date(now.getTime() - days*86400000);
           const pl = await firefishGet("/placements/search?dateFrom=" + ago.toISOString().split("T")[0] + "&dateTo=" + now.toISOString().split("T")[0] + "&limit=" + (input.limit||50));
           const list = Array.isArray(pl) ? pl : pl.Results || pl.data || [];
@@ -1324,7 +1340,7 @@ async function handleToolCall(name, input) {
           let t = "Found " + list.length + " placement(s):\n\n";
           let fees = 0;
           list.forEach(p => {
-            const cand = p.CandidateName || (p.FirstName||""+" "+p.LastName||"").trim() || "Unknown";
+            const cand = p.CandidateName || ((p.FirstName || "") + " " + (p.LastName || "")).trim() || "Unknown";
             t += "- " + cand;
             if (p.JobTitle||p.Role) t += " -> " + (p.JobTitle||p.Role);
             if (p.CompanyName||p.Company) t += " at " + (p.CompanyName||p.Company);
@@ -1620,7 +1636,13 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       for (const block of response.content) {
         if (block.type === 'tool_use') {
           console.log(`Calling tool: ${block.name}`, JSON.stringify(block.input).substring(0, 200));
-          const result = await handleToolCall(block.name, block.input);
+          let result;
+          try {
+            result = await handleToolCall(block.name, block.input);
+          } catch (toolErr) {
+            console.error(`Tool ${block.name} crashed: ${toolErr.message}`);
+            result = `Tool ${block.name} failed: ${toolErr.message}`;
+          }
           toolResults.push({
             type: 'tool_result',
             tool_use_id: block.id,
@@ -2092,6 +2114,10 @@ app.get("/webhook-info", async (req, res) => {
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
+
+// Startup validation
+if (!ANTHROPIC_API_KEY) { console.error("FATAL: ANTHROPIC_API_KEY not set. Exiting."); process.exit(1); }
+if (!TELEGRAM_TOKEN && !WA_ACCESS_TOKEN) { console.error("FATAL: Neither TELEGRAM_TOKEN nor WA_ACCESS_TOKEN set. Exiting."); process.exit(1); }
 
 app.listen(PORT, () => {
   console.log(`Sam TRC bot running on port ${PORT}`);
