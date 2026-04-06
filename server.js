@@ -31,6 +31,12 @@ const ODOO_API_KEY = process.env.ODOO_API_KEY;
 const ODOO_URL = process.env.ODOO_URL || "https://thinktalent.com.mt";
 const ODOO_LOGIN = process.env.ODOO_LOGIN; // e.g. admin email — used to authenticate and get UID
 
+// Microsoft Graph
+const MS_TENANT_ID = process.env.MS_TENANT_ID;
+const MS_CLIENT_ID = process.env.MS_CLIENT_ID;
+const MS_CLIENT_SECRET = process.env.MS_CLIENT_SECRET;
+const BEVERLY_EMAIL = process.env.BEVERLY_EMAIL || 'beverly@theremarkablecollective.com';
+
 // Allowed Telegram user IDs (Beverly + Jonathan)
 const ALLOWED_USERS = (process.env.ALLOWED_TELEGRAM_USERS || "")
   .split(",")
@@ -253,13 +259,19 @@ You have LIVE, REAL-TIME access to both business systems through tools. You are 
 - Candidate search
 - Company search
 
+**Microsoft 365 (Beverly's Email & Calendar) — Read Only:**
+- check_beverly_email — Check Beverly's inbox (recent, search, unread)
+- check_beverly_calendar — Check Beverly's schedule and meetings
+
+
 **When Beverly asks about specific data:**
 1. USE YOUR TOOLS. Never guess. Never say "I don't have that information."
 2. Query with the right filters — company name, date range, source, salesperson, whatever she specifies.
 3. If a query returns no results, say so clearly and suggest alternative searches.
 4. Cross-reference both systems when relevant — a company could appear in Odoo AND Firefish.
 5. For general "how are things" questions, use get_pipeline_summary for a quick overview.
-6. You have NO artificial limits. Query as much data as you need.
+6. When Beverly asks about her emails, meetings, schedule, or who contacted her — use check_beverly_email or check_beverly_calendar immediately. They are always current.
+7. You have NO artificial limits. Query as much data as you need.
 
 ---
 
@@ -574,6 +586,29 @@ const SAM_TOOLS = [
       required: ["competitor_name"]
     }
   },
+  {
+    name: "check_beverly_email",
+    description: "[MICROSOFT 365] Check Beverly's recent emails. Use when she asks about emails, inbox, messages, or who emailed her. Shows sender, subject, date, and preview.",
+    input_schema: {
+      type: "object",
+      properties: {
+        count: { type: "number", description: "Number of recent emails to fetch (default 10, max 25)" },
+        search: { type: "string", description: "Optional search query to filter emails (sender name, subject keyword, etc.)" },
+        unread_only: { type: "boolean", description: "If true, only show unread emails" }
+      }
+    }
+  },
+  {
+    name: "check_beverly_calendar",
+    description: "[MICROSOFT 365] Check Beverly's calendar/schedule. Use when she asks about meetings, schedule, what's on today/this week, upcoming appointments, or availability.",
+    input_schema: {
+      type: "object",
+      properties: {
+        days_ahead: { type: "number", description: "Number of days ahead to check (default 1 for today, max 14)" },
+        date: { type: "string", description: "Specific date to check (YYYY-MM-DD format). If not provided, starts from today." }
+      }
+    }
+  },
 ];
 
 // ─── HTTP Helper ──────────────────────────────────────────────────────────────
@@ -637,6 +672,41 @@ function fetchJSON(url, options = {}) {
 // ─── Firefish API Client ──────────────────────────────────────────────────────
 
 let firefishTokenCache = { token: null, expiresAt: 0 };
+
+let msGraphTokenCache = { token: null, expiresAt: 0 };
+
+async function msGraphAuth() {
+  if (!MS_TENANT_ID || !MS_CLIENT_ID || !MS_CLIENT_SECRET) {
+    throw new Error("Microsoft Graph credentials not configured");
+  }
+  if (msGraphTokenCache.token && Date.now() < msGraphTokenCache.expiresAt) {
+    return msGraphTokenCache.token;
+  }
+  const params = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: MS_CLIENT_ID,
+    client_secret: MS_CLIENT_SECRET,
+    scope: "https://graph.microsoft.com/.default",
+  });
+  const res = await fetchJSON(
+    `https://login.microsoftonline.com/${MS_TENANT_ID}/oauth2/v2.0/token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params.toString(),
+    }
+  );
+  msGraphTokenCache.token = res.access_token;
+  msGraphTokenCache.expiresAt = Date.now() + ((res.expires_in || 3600) - 300) * 1000;
+  return res.access_token;
+}
+
+async function msGraphGet(path) {
+  const token = await msGraphAuth();
+  return await fetchJSON(`https://graph.microsoft.com/v1.0${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
 
 async function firefishAuth() {
   if (firefishTokenCache.token && Date.now() < firefishTokenCache.expiresAt) {
@@ -1392,6 +1462,89 @@ t += "\n";
         } catch(e) { return "Firefish error: " + e.message; }
       }
 
+      case "check_beverly_email": {
+        try {
+          if (!MS_CLIENT_ID) return "Microsoft 365 credentials not configured.";
+          const count = Math.min(input.count || 10, 25);
+          let path = `/users/${BEVERLY_EMAIL}/messages?$top=${count}&$orderby=receivedDateTime desc&$select=subject,from,receivedDateTime,bodyPreview,isRead`;
+          if (input.search) {
+            path += `&$search="${encodeURIComponent(input.search)}"`;
+          }
+          if (input.unread_only) {
+            path += "&$filter=isRead eq false";
+          }
+          const res = await msGraphGet(path);
+          const emails = res.value || [];
+          if (!emails.length) return input.unread_only ? "No unread emails." : "No emails found.";
+          let t = `Found ${emails.length} email(s):\n\n`;
+          emails.forEach(email => {
+            const sender = email.from?.emailAddress?.name || email.from?.emailAddress?.address || "Unknown";
+            const subject = email.subject || "(No subject)";
+            const date = new Date(email.receivedDateTime).toLocaleDateString("en-GB", {
+              year: "numeric", month: "short", day: "numeric",
+              hour: "2-digit", minute: "2-digit", timeZone: "Europe/Malta"
+            });
+            const preview = (email.bodyPreview || "").substring(0, 100);
+            const status = email.isRead ? "read" : "UNREAD";
+            t += `- **${sender}** | ${date} [${status}]\n`;
+            t += `  Subject: ${subject}\n`;
+            if (preview) t += `  Preview: ${preview}...\n`;
+            t += "\n";
+          });
+          return t;
+        } catch (e) {
+          if (e.message.includes("not configured")) return "Microsoft 365 credentials not configured.";
+          return "Microsoft Graph error: " + e.message;
+        }
+      }
+
+      case "check_beverly_calendar": {
+        try {
+          if (!MS_CLIENT_ID) return "Microsoft 365 credentials not configured.";
+          const daysAhead = Math.min(input.days_ahead || 1, 14);
+          let startDate = new Date();
+          if (input.date) {
+            startDate = new Date(input.date + "T00:00:00");
+          }
+          // Set start to beginning of day in Malta
+          startDate.setHours(0, 0, 0, 0);
+          const endDate = new Date(startDate);
+          endDate.setDate(endDate.getDate() + daysAhead);
+          const startISO = startDate.toISOString();
+          const endISO = endDate.toISOString();
+          const path = `/users/${BEVERLY_EMAIL}/calendarView?startDateTime=${encodeURIComponent(startISO)}&endDateTime=${encodeURIComponent(endISO)}&$orderby=start/dateTime&$select=subject,start,end,location,organizer,isAllDay,bodyPreview`;
+          const res = await msGraphGet(path);
+          const events = res.value || [];
+          if (!events.length) return `No meetings scheduled for the next ${daysAhead} day(s).`;
+          let t = `Found ${events.length} meeting(s):\n\n`;
+          events.forEach(event => {
+            const startTime = new Date(event.start.dateTime + "Z").toLocaleDateString("en-GB", {
+              weekday: "short", year: "numeric", month: "short", day: "numeric",
+              hour: "2-digit", minute: "2-digit", timeZone: "Europe/Malta"
+            });
+            const endTime = new Date(event.end.dateTime + "Z").toLocaleTimeString("en-GB", {
+              hour: "2-digit", minute: "2-digit", timeZone: "Europe/Malta"
+            });
+            const duration = Math.round((new Date(event.end.dateTime) - new Date(event.start.dateTime)) / 60000);
+            const location = event.location?.displayName ? ` | Location: ${event.location.displayName}` : "";
+            const organizer = event.organizer?.emailAddress?.name || "";
+            t += `- **${event.subject || "No title"}**\n`;
+            if (event.isAllDay) {
+              t += "  All day\n";
+            } else {
+              t += `  ${startTime} \u2014 ${endTime} (${duration} min)\n`;
+            }
+            if (location) t += `  ${location}\n`;
+            if (organizer && organizer !== "Beverly Cutajar") t += `  Organiser: ${organizer}\n`;
+            t += "\n";
+          });
+          return t;
+        } catch (e) {
+          if (e.message.includes("not configured")) return "Microsoft 365 credentials not configured.";
+          return "Microsoft Graph error: " + e.message;
+        }
+      }
+
       case "log_odoo_note": {
         if (!ODOO_API_KEY) return "Odoo credentials not configured.";
         await odooRPC(input.model, "message_post", [[input.record_id]], {
@@ -2126,4 +2279,5 @@ app.listen(PORT, () => {
   console.log(`Claude: ${ANTHROPIC_API_KEY ? "configured" : "NOT SET"}`);
   console.log(`Telegram: ${TELEGRAM_TOKEN ? "configured" : "NOT SET"}`);
   console.log(`WhatsApp: ${WA_ACCESS_TOKEN ? 'configured' : 'NOT SET'} (Phone ID: ${WA_PHONE_NUMBER_ID || 'NOT SET'})`);
+  console.log(`Microsoft 365: ${MS_CLIENT_ID ? 'configured' : 'NOT SET'} (Email: ${BEVERLY_EMAIL})`);
 });
