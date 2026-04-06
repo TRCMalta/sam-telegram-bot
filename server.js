@@ -1515,15 +1515,19 @@ t += "\n";
       case "check_beverly_email": {
         try {
           if (!MS_CLIENT_ID) return "Microsoft 365 credentials not configured.";
-          const count = Math.min(input.count || 10, 25);
-          let path = `/users/${BEVERLY_EMAIL}/messages?$top=${count}&$orderby=receivedDateTime desc&$select=subject,from,receivedDateTime,bodyPreview,isRead`;
+          const count = Math.min(input.count || 10, input.search ? 50 : 25);
+          const selectFields = "id,subject,from,receivedDateTime,isRead,bodyPreview";
+          let path;
           if (input.search) {
-            path += `&$search="${encodeURIComponent(input.search)}"`;
+            // Graph API: $search cannot be combined with $orderby or $filter
+            path = "/users/" + BEVERLY_EMAIL + "/messages?$top=" + count + "&$select=" + selectFields + "&$search=\"" + encodeURIComponent(input.search) + "\"";
+          } else {
+            path = "/users/" + BEVERLY_EMAIL + "/messages?$top=" + count + "&$orderby=receivedDateTime desc&$select=" + selectFields;
+            if (input.unread_only) {
+              path += "&$filter=isRead eq false";
+            }
           }
-          if (input.unread_only) {
-            path += "&$filter=isRead eq false";
-          }
-          const res = await msGraphGet(path);
+const res = await msGraphGet(path);
           const emails = res.value || [];
           if (!emails.length) return input.unread_only ? "No unread emails." : "No emails found.";
           let t = `Found ${emails.length} email(s):\n\n`;
