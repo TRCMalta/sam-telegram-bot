@@ -126,87 +126,125 @@ def compute_score(assets: dict[str, list[Note]], compliance: dict[str, list[Note
 
     answered, total_q = count_open_questions(open_q_text)
 
-    def filled(notes, predicate):
-        if not notes:
-            return None
-        return sum(1 for n in notes if predicate(n)) / len(notes)
+    evidence_dir = VAULT_ROOT / "Compliance" / "Evidence"
 
-    # Each criterion is a measurable control toward EU compliance posture.
+    def evidence_present(subpath: str) -> float:
+        """1.0 if the named evidence subfolder contains at least one real file
+        (anything that isn't `.gitkeep` or the README), else 0.0."""
+        p = evidence_dir / subpath
+        if not p.exists() or not p.is_dir():
+            return 0.0
+        for f in p.iterdir():
+            if f.name in {".gitkeep", "README.md"}:
+                continue
+            return 1.0
+        return 0.0
+
+    def real_notes(notes, exclude: set[str] = None):
+        exclude = exclude or {"Template.md", "TIA Template.md", "DPIA Trigger Test.md"}
+        return [n for n in notes if n.path.name not in exclude]
+
+    # Each criterion is scored on TWO axes:
+    #   structural: does the policy / register / procedure file exist in the vault?
+    #   evidence:   is there proof in Compliance/Evidence/ that the control is operating?
     criteria = [
         {
             "key": "ropa",
             "label": "Recorded",
             "icon": "📒",
-            "description": "Every AI system has a paired Record of Processing Activity (GDPR Art. 30).",
-            # Templates do not count.
-            "progress": (sum(1 for n in ropas if "Template" not in n.path.name) /
-                         max(1, len([a for a in ai_agents if a.title != "Judge Dredd"])))
-            if ai_agents else None,
+            "description": "Every AI agent has a paired Record of Processing Activity (GDPR Art. 30).",
+            "structural": (len(real_notes(ropas)) / max(1, len(ai_agents))) if ai_agents else None,
+            "evidence": evidence_present("ROPA"),
         },
         {
             "key": "register",
             "label": "Classified",
             "icon": "🏷",
-            "description": "Every AI agent has an entry in the AI System Register with risk classification.",
-            "progress": (sum(1 for n in ai_register if "Template" not in n.path.name) /
-                         max(1, len(ai_agents))) if ai_agents else None,
+            "description": "Every AI agent has an entry in the AI System Register with confirmed risk classification.",
+            "structural": (len(real_notes(ai_register)) / max(1, len(ai_agents))) if ai_agents else None,
+            "evidence": evidence_present("Classification"),
         },
         {
             "key": "dpia",
             "label": "Impact Assessed",
             "icon": "🧮",
             "description": "DPIA exists for every high-risk processing activity (GDPR Art. 35 + AI Act Art. 26(9)).",
-            "progress": filled(dpias, lambda n: n.path.name not in {"Template.md", "DPIA Trigger Test.md"}),
+            "structural": 1.0 if real_notes(dpias) else 0.0,
+            "evidence": evidence_present("DPIAs"),
         },
         {
             "key": "transfers",
             "label": "Transfers Mapped",
             "icon": "🌍",
             "description": "International transfer register exists with at least one TIA per non-adequate recipient.",
-            "progress": 1.0 if any("Transfer Register" in n.path.name for n in transfers) else 0.0,
+            "structural": 1.0 if any("Transfer Register" in n.path.name for n in transfers) else 0.0,
+            "evidence": evidence_present("Transfers"),
         },
         {
             "key": "processors",
             "label": "Processor DPAs",
             "icon": "🤝",
-            "description": "Processor register exists; DPA status tracked per processor.",
-            "progress": 1.0 if any("Register" in n.path.name for n in processors) else 0.0,
+            "description": "Processor register exists; signed DPAs filed in Evidence per processor.",
+            "structural": 1.0 if any("Register" in n.path.name for n in processors) else 0.0,
+            "evidence": evidence_present("DPAs"),
         },
         {
             "key": "incidents",
             "label": "Incident-Ready",
             "icon": "🚨",
-            "description": "72-hour breach procedure (GDPR Art. 33) is in place.",
-            "progress": 1.0 if any("Procedure" in n.path.name for n in incidents) else 0.0,
+            "description": "72-hour breach procedure (GDPR Art. 33) in place and tabletop-exercised.",
+            "structural": 1.0 if any("Procedure" in n.path.name for n in incidents) else 0.0,
+            "evidence": evidence_present("Incidents"),
         },
         {
             "key": "literacy",
             "label": "AI-Literate",
             "icon": "📚",
-            "description": "AI Literacy Programme is published (AI Act Art. 4, in force).",
-            "progress": 1.0 if any("AI Literacy" in n.path.name for n in policies) else 0.0,
+            "description": "AI Literacy Programme published and training records on file (AI Act Art. 4).",
+            "structural": 1.0 if any("AI Literacy" in n.path.name for n in policies) else 0.0,
+            "evidence": evidence_present("AI Literacy"),
         },
         {
             "key": "transparency",
             "label": "Transparent",
             "icon": "🪟",
-            "description": "AI Transparency Notice drafted for Art. 50 (2 Aug 2026).",
-            "progress": 1.0 if any("AI Transparency" in n.path.name for n in notices) else 0.0,
+            "description": "AI transparency notice drafted AND visible in production (Art. 50, deadline 2 Aug 2026).",
+            "structural": 1.0 if any("AI Transparency" in n.path.name for n in notices) else 0.0,
+            "evidence": evidence_present("AI Transparency"),
+        },
+        {
+            "key": "worker_notice",
+            "label": "Workers Informed",
+            "icon": "✍️",
+            "description": "Counter-signed worker notification on file (AI Act Art. 26(7), deadline 2 Aug 2026).",
+            "structural": 1.0 if any("Worker Notification" in n.path.name for n in notices) else 0.0,
+            "evidence": evidence_present("Worker Notification"),
+        },
+        {
+            "key": "log_retention",
+            "label": "Logs Retained",
+            "icon": "💾",
+            "description": "Railway log retention ≥ 6 months evidenced (AI Act Art. 26(6)).",
+            "structural": 1.0,  # the obligation is documented in the AI System Register
+            "evidence": evidence_present("Log Retention"),
         },
         {
             "key": "inquisitor",
             "label": "Inquisitor",
             "icon": "📋",
             "description": "All open questions resolved.",
-            "progress": (answered / total_q) if total_q else 1.0,
+            "structural": (answered / total_q) if total_q else 1.0,
+            "evidence": (answered / total_q) if total_q else 1.0,
         },
     ]
 
-    measurable = [c for c in criteria if c["progress"] is not None]
-    overall = sum(c["progress"] for c in measurable) / len(measurable) if measurable else 0.0
+    def avg(field: str) -> float:
+        vals = [c[field] for c in criteria if c.get(field) is not None]
+        return sum(vals) / len(vals) if vals else 0.0
 
     return {
-        "overall": overall,
+        "structural": avg("structural"),
+        "evidence": avg("evidence"),
         "criteria": criteria,
         "counts": {
             "projects": len(projects),
@@ -214,8 +252,8 @@ def compute_score(assets: dict[str, list[Note]], compliance: dict[str, list[Note
             "jobs": len(jobs),
             "datasets": len(datasets),
             "integrations": len(integrations),
-            "ropas": len([n for n in ropas if "Template" not in n.path.name]),
-            "ai_register": len([n for n in ai_register if "Template" not in n.path.name]),
+            "ropas": len(real_notes(ropas)),
+            "ai_register": len(real_notes(ai_register)),
             "policies": len(policies),
             "notices": len(notices),
         },
