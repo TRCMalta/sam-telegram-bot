@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TRC Audit Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel-2: #1e252e;
+    --border: #2a313c;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --earned: #1f9d55;
+    --partial: #d97706;
+    --missing: #c0392b;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:32px 40px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; }
+  header h1 { margin:0; font-size:28px; }
+  header .subtitle { color:var(--muted); margin-top:4px; }
+  header .actions { display:flex; gap:12px; }
+  .btn { background:var(--accent); color:#0e1116; padding:12px 20px; border-radius:8px; text-decoration:none; font-weight:600; display:inline-flex; align-items:center; gap:8px; border:none; cursor:pointer; }
+  .btn:hover { filter:brightness(1.1); }
+  .btn.secondary { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  main { padding:24px 40px 80px; max-width:1400px; margin:0 auto; }
+  .score-row { display:grid; grid-template-columns: 320px 1fr; gap:24px; margin-bottom:32px; }
+  @media (max-width: 900px) { .score-row { grid-template-columns:1fr; } }
+  .score-tile { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:24px; text-align:center; }
+  .score-tile .ring { width:180px; height:180px; margin:0 auto 12px; position:relative; }
+  .score-tile .ring svg { width:100%; height:100%; transform:rotate(-90deg); }
+  .score-tile .ring .pct { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:36px; font-weight:700; }
+  .score-tile h2 { margin:8px 0 4px; font-size:18px; }
+  .score-tile p { color:var(--muted); margin:0; font-size:13px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(140px,1fr)); gap:12px; }
+  .kpi { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:18px; text-align:center; }
+  .kpi-value { font-size:30px; font-weight:700; color:var(--accent); }
+  .kpi-label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:0.06em; margin-top:6px; }
+  h2.section-title { font-size:18px; margin:32px 0 16px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+  .badges { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px,1fr)); gap:16px; }
+  .badge { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; display:flex; gap:14px; align-items:flex-start; }
+  .badge.earned { border-color:var(--earned); box-shadow: 0 0 0 1px var(--earned) inset; }
+  .badge.partial { border-color:var(--partial); }
+  .badge.missing { border-color:var(--missing); opacity:0.85; }
+  .badge.pending { opacity:0.5; }
+  .badge-icon { font-size:32px; line-height:1; }
+  .badge-body { flex:1; min-width:0; }
+  .badge-title { font-weight:700; }
+  .badge-desc { color:var(--muted); font-size:13px; margin:4px 0 8px; }
+  .bar { background:var(--panel-2); height:6px; border-radius:4px; overflow:hidden; }
+  .bar-fill { background:var(--accent); height:100%; border-radius:4px; transition:width 0.4s; }
+  .badge.earned .bar-fill { background:var(--earned); }
+  .badge.partial .bar-fill { background:var(--partial); }
+  .badge.missing .bar-fill { background:var(--missing); }
+  .bar-label { font-size:11px; color:var(--muted); margin-top:2px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); gap:16px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; overflow:hidden; }
+  .card h3 { margin:0 0 12px; font-size:14px; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); }
+  .card table { width:100%; border-collapse:collapse; font-size:13px; }
+  .card th, .card td { text-align:left; padding:6px 4px; border-bottom:1px solid var(--border); }
+  .card th { color:var(--muted); font-weight:500; font-size:11px; text-transform:uppercase; }
+  .compliance-list { list-style:none; padding:0; margin:0; font-size:13px; }
+  .compliance-list li { padding:6px 0; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; gap:8px; }
+  .compliance-list li:last-child { border-bottom:none; }
+  .status { color:var(--muted); font-size:11px; }
+  .muted { color:var(--muted); font-style:italic; }
+  footer { padding:24px 40px; color:var(--muted); font-size:12px; border-top:1px solid var(--border); text-align:center; }
+  details { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:12px 16px; margin-top:24px; }
+  details pre { overflow:auto; font-size:11px; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>TRC Audit Dashboard</h1>
+    <div class="subtitle">Standalone audit programme · jurisdiction: EU (Malta) · GDPR + EU AI Act · Governor: Jonathan</div>
+  </div>
+  <div class="actions">
+    <a class="btn" href="TRC-Audit.docx" download>⬇  Download Word Report</a>
+    <a class="btn secondary" href="Master Audit.md">Open Master Audit</a>
+  </div>
+</header>
+<main>
+  <div class="score-row">
+    <div class="score-tile">
+      <div class="ring">
+        <svg viewBox="0 0 100 100">
+          <circle cx="50" cy="50" r="44" stroke="#2a313c" stroke-width="10" fill="none"/>
+          <circle cx="50" cy="50" r="44" stroke="#d97706" stroke-width="10" fill="none"
+            stroke-dasharray="276" stroke-dashoffset="61" stroke-linecap="round"/>
+        </svg>
+        <div class="pct">78%</div>
+      </div>
+      <h2>Compliance Posture Score</h2>
+      <p>Weighted average across the controls below.<br>Open questions: <strong>0/27</strong> resolved.</p>
+    </div>
+    <div>
+      <h2 class="section-title">Asset and control counts</h2>
+      <div class="kpis"><div class='kpi'><div class='kpi-value'>0</div><div class='kpi-label'>projects</div></div><div class='kpi'><div class='kpi-value'>1</div><div class='kpi-label'>agents</div></div><div class='kpi'><div class='kpi-value'>0</div><div class='kpi-label'>jobs</div></div><div class='kpi'><div class='kpi-value'>0</div><div class='kpi-label'>datasets</div></div><div class='kpi'><div class='kpi-value'>8</div><div class='kpi-label'>integrations</div></div><div class='kpi'><div class='kpi-value'>1</div><div class='kpi-label'>ropas</div></div><div class='kpi'><div class='kpi-value'>1</div><div class='kpi-label'>ai register</div></div><div class='kpi'><div class='kpi-value'>6</div><div class='kpi-label'>policies</div></div><div class='kpi'><div class='kpi-value'>2</div><div class='kpi-label'>notices</div></div></div>
+    </div>
+  </div>
+
+  <h2 class="section-title">Compliance Badges</h2>
+  <div class="badges"><div class='badge earned'><div class='badge-icon'>📒</div><div class='badge-body'><div class='badge-title'>Recorded</div><div class='badge-desc'>Every AI system has a paired Record of Processing Activity (GDPR Art. 30).</div><div class='bar'><div class='bar-fill' style='width:100%'></div></div><div class='bar-label'>100%</div></div></div><div class='badge earned'><div class='badge-icon'>🏷</div><div class='badge-body'><div class='badge-title'>Classified</div><div class='badge-desc'>Every AI agent has an entry in the AI System Register with risk classification.</div><div class='bar'><div class='bar-fill' style='width:100%'></div></div><div class='bar-label'>100%</div></div></div><div class='badge missing'><div class='badge-icon'>🧮</div><div class='badge-body'><div class='badge-title'>Impact Assessed</div><div class='badge-desc'>DPIA exists for every high-risk processing activity (GDPR Art. 35 + AI Act Art. 26(9)).</div><div class='bar'><div class='bar-fill' style='width:0%'></div></div><div class='bar-label'>0%</div></div></div><div class='badge earned'><div class='badge-icon'>🌍</div><div class='badge-body'><div class='badge-title'>Transfers Mapped</div><div class='badge-desc'>International transfer register exists with at least one TIA per non-adequate recipient.</div><div class='bar'><div class='bar-fill' style='width:100%'></div></div><div class='bar-label'>100%</div></div></div><div class='badge earned'><div class='badge-icon'>🤝</div><div class='badge-body'><div class='badge-title'>Processor DPAs</div><div class='badge-desc'>Processor register exists; DPA status tracked per processor.</div><div class='bar'><div class='bar-fill' style='width:100%'></div></div><div class='bar-label'>100%</div></div></div><div class='badge earned'><div class='badge-icon'>🚨</div><div class='badge-body'><div class='badge-title'>Incident-Ready</div><div class='badge-desc'>72-hour breach procedure (GDPR Art. 33) is in place.</div><div class='bar'><div class='bar-fill' style='width:100%'></div></div><div class='bar-label'>100%</div></div></div><div class='badge earned'><div class='badge-icon'>📚</div><div class='badge-body'><div class='badge-title'>AI-Literate</div><div class='badge-desc'>AI Literacy Programme is published (AI Act Art. 4, in force).</div><div class='bar'><div class='bar-fill' style='width:100%'></div></div><div class='bar-label'>100%</div></div></div><div class='badge earned'><div class='badge-icon'>🪟</div><div class='badge-body'><div class='badge-title'>Transparent</div><div class='badge-desc'>AI Transparency Notice drafted for Art. 50 (2 Aug 2026).</div><div class='bar'><div class='bar-fill' style='width:100%'></div></div><div class='bar-label'>100%</div></div></div><div class='badge missing'><div class='badge-icon'>📋</div><div class='badge-body'><div class='badge-title'>Inquisitor</div><div class='badge-desc'>All open questions resolved.</div><div class='bar'><div class='bar-fill' style='width:0%'></div></div><div class='bar-label'>0%</div></div></div></div>
+
+  <h2 class="section-title">Compliance artefacts</h2>
+  <div class="grid"><section class='card'><h3>01 Records of Processing</h3><ul class='compliance-list'><li>Sam — AI Chief of Staff <span class='status'></span></li>
+<li>&lt;name&gt; <span class='status'></span></li></ul></section><section class='card'><h3>02 AI System Register</h3><ul class='compliance-list'><li>Sam <span class='status'>live</span></li>
+<li>&lt;System name&gt; <span class='status'>live | in development | paused | retired</span></li></ul></section><section class='card'><h3>03 DPIAs</h3><ul class='compliance-list'><li>Template <span class='status'>draft | under review | approved | superseded</span></li></ul></section><section class='card'><h3>04 International Transfers</h3><ul class='compliance-list'><li>TIA Template <span class='status'>draft | approved | superseded</span></li>
+<li>Transfer Register <span class='status'></span></li></ul></section><section class='card'><h3>05 Processors and DPAs</h3><ul class='compliance-list'><li>Register <span class='status'></span></li></ul></section><section class='card'><h3>06 Data Subject Rights</h3><ul class='compliance-list'><li>Procedure <span class='status'></span></li>
+<li>Register <span class='status'></span></li></ul></section><section class='card'><h3>07 Incidents</h3><ul class='compliance-list'><li>Procedure <span class='status'></span></li>
+<li>Register <span class='status'></span></li></ul></section><section class='card'><h3>08 Policies</h3><ul class='compliance-list'><li>AI Literacy Programme <span class='status'>in force</span></li>
+<li>Acceptable AI Use Policy <span class='status'>draft</span></li>
+<li>DPO Assessment <span class='status'>open assessment</span></li>
+<li>Data Protection Policy <span class='status'>draft</span></li>
+<li>Records Retention Schedule <span class='status'>draft</span></li>
+<li>Vendor Management Policy <span class='status'>draft</span></li></ul></section><section class='card'><h3>09 Notices</h3><ul class='compliance-list'><li>AI Transparency Notice <span class='status'>draft</span></li>
+<li>Worker Notification <span class='status'>draft</span></li></ul></section></div>
+
+  <h2 class="section-title">Asset registers</h2>
+  <div class="grid"><section class='card'><h3>Agents</h3><table><thead><tr><th>Name</th><th>Status</th><th>Owner</th></tr></thead><tbody><tr><td>Judge Dredd</td><td>live</td><td>Jonathan (Governor)</td></tr></tbody></table></section><section class='card'><h3>Integrations</h3><table><thead><tr><th>Name</th><th>Status</th><th>Owner</th></tr></thead><tbody><tr><td>Anthropic</td><td>ai</td><td>Unknown — see [[Open Questions]]</td></tr>
+<tr><td>Claude</td><td>ai</td><td>See [[Anthropic]]</td></tr>
+<tr><td>Firefish</td><td>business-software</td><td>Unknown — see [[Open Questions]]</td></tr>
+<tr><td>Microsoft Graph</td><td>productivity</td><td>TRC Microsoft 365 tenant</td></tr>
+<tr><td>Odoo</td><td>business-software</td><td>TRC (self-hosted at thinktalent.com.mt)</td></tr>
+<tr><td>Railway</td><td>hosting</td><td>Unknown — see [[Open Questions]]</td></tr>
+<tr><td>Telegram Bot API</td><td>messaging</td><td>N/A (free tier)</td></tr>
+<tr><td>WhatsApp Cloud API</td><td>messaging</td><td>Unknown — see [[Open Questions]]</td></tr></tbody></table></section><section class='card'><h3>Concepts</h3><table><thead><tr><th>Name</th><th>Status</th><th>Owner</th></tr></thead><tbody><tr><td>Alfred</td><td>out-of-scope</td><td></td></tr>
+<tr><td>Annex III - High-Risk AI Systems</td><td>eu-ai-act</td><td></td></tr>
+<tr><td>Article 26 - Deployer Obligations</td><td>eu-ai-act</td><td></td></tr>
+<tr><td>Article 27 - FRIA</td><td>eu-ai-act</td><td></td></tr>
+<tr><td>Article 4 - AI Literacy</td><td>eu-ai-act</td><td></td></tr>
+<tr><td>Article 50 - AI Transparency</td><td>eu-ai-act</td><td></td></tr>
+<tr><td>Claude Code</td><td></td><td></td></tr>
+<tr><td>Cron</td><td></td><td></td></tr>
+<tr><td>DPIA</td><td>gdpr</td><td></td></tr>
+<tr><td>DPO</td><td>gdpr</td><td></td></tr>
+<tr><td>Data Controller</td><td>gdpr</td><td></td></tr>
+<tr><td>Data Processing Agreement</td><td>gdpr</td><td></td></tr>
+<tr><td>Data Processor</td><td>gdpr</td><td></td></tr>
+<tr><td>Data Subject Rights</td><td>gdpr</td><td></td></tr>
+<tr><td>Environment variable</td><td></td><td></td></tr>
+<tr><td>GDPR Article 28 - Processors</td><td>gdpr</td><td></td></tr>
+<tr><td>GDPR Article 30 - ROPA</td><td>gdpr</td><td></td></tr>
+<tr><td>GDPR Article 35 - DPIA</td><td>gdpr</td><td></td></tr>
+<tr><td>GDPR Chapter V - International Transfers</td><td>gdpr</td><td></td></tr>
+<tr><td>JSON-RPC</td><td></td><td></td></tr>
+<tr><td>Joint Controllers</td><td>gdpr</td><td></td></tr>
+<tr><td>Lawful Basis</td><td>gdpr</td><td></td></tr>
+<tr><td>Personal Data Breach</td><td>gdpr</td><td></td></tr>
+<tr><td>Special Category Data</td><td>gdpr</td><td></td></tr>
+<tr><td>Standard Contractual Clauses</td><td>gdpr</td><td></td></tr>
+<tr><td>TRC</td><td></td><td></td></tr>
+<tr><td>Webhook</td><td></td><td></td></tr></tbody></table></section></div>
+
+  <details>
+    <summary>Raw data (machine-readable)</summary>
+    <pre>{
+  &quot;overall&quot;: 0.7777777777777778,
+  &quot;criteria&quot;: [
+    {
+      &quot;key&quot;: &quot;ropa&quot;,
+      &quot;label&quot;: &quot;Recorded&quot;,
+      &quot;icon&quot;: &quot;\ud83d\udcd2&quot;,
+      &quot;description&quot;: &quot;Every AI system has a paired Record of Processing Activity (GDPR Art. 30).&quot;,
+      &quot;progress&quot;: 1.0
+    },
+    {
+      &quot;key&quot;: &quot;register&quot;,
+      &quot;label&quot;: &quot;Classified&quot;,
+      &quot;icon&quot;: &quot;\ud83c\udff7&quot;,
+      &quot;description&quot;: &quot;Every AI agent has an entry in the AI System Register with risk classification.&quot;,
+      &quot;progress&quot;: 1.0
+    },
+    {
+      &quot;key&quot;: &quot;dpia&quot;,
+      &quot;label&quot;: &quot;Impact Assessed&quot;,
+      &quot;icon&quot;: &quot;\ud83e\uddee&quot;,
+      &quot;description&quot;: &quot;DPIA exists for every high-risk processing activity (GDPR Art. 35 + AI Act Art. 26(9)).&quot;,
+      &quot;progress&quot;: 0.0
+    },
+    {
+      &quot;key&quot;: &quot;transfers&quot;,
+      &quot;label&quot;: &quot;Transfers Mapped&quot;,
+      &quot;icon&quot;: &quot;\ud83c\udf0d&quot;,
+      &quot;description&quot;: &quot;International transfer register exists with at least one TIA per non-adequate recipient.&quot;,
+      &quot;progress&quot;: 1.0
+    },
+    {
+      &quot;key&quot;: &quot;processors&quot;,
+      &quot;label&quot;: &quot;Processor DPAs&quot;,
+      &quot;icon&quot;: &quot;\ud83e\udd1d&quot;,
+      &quot;description&quot;: &quot;Processor register exists; DPA status tracked per processor.&quot;,
+      &quot;progress&quot;: 1.0
+    },
+    {
+      &quot;key&quot;: &quot;incidents&quot;,
+      &quot;label&quot;: &quot;Incident-Ready&quot;,
+      &quot;icon&quot;: &quot;\ud83d\udea8&quot;,
+      &quot;description&quot;: &quot;72-hour breach procedure (GDPR Art. 33) is in place.&quot;,
+      &quot;progress&quot;: 1.0
+    },
+    {
+      &quot;key&quot;: &quot;literacy&quot;,
+      &quot;label&quot;: &quot;AI-Literate&quot;,
+      &quot;icon&quot;: &quot;\ud83d\udcda&quot;,
+      &quot;description&quot;: &quot;AI Literacy Programme is published (AI Act Art. 4, in force).&quot;,
+      &quot;progress&quot;: 1.0
+    },
+    {
+      &quot;key&quot;: &quot;transparency&quot;,
+      &quot;label&quot;: &quot;Transparent&quot;,
+      &quot;icon&quot;: &quot;\ud83e\ude9f&quot;,
+      &quot;description&quot;: &quot;AI Transparency Notice drafted for Art. 50 (2 Aug 2026).&quot;,
+      &quot;progress&quot;: 1.0
+    },
+    {
+      &quot;key&quot;: &quot;inquisitor&quot;,
+      &quot;label&quot;: &quot;Inquisitor&quot;,
+      &quot;icon&quot;: &quot;\ud83d\udccb&quot;,
+      &quot;description&quot;: &quot;All open questions resolved.&quot;,
+      &quot;progress&quot;: 0.0
+    }
+  ],
+  &quot;counts&quot;: {
+    &quot;projects&quot;: 0,
+    &quot;agents&quot;: 1,
+    &quot;jobs&quot;: 0,
+    &quot;datasets&quot;: 0,
+    &quot;integrations&quot;: 8,
+    &quot;ropas&quot;: 1,
+    &quot;ai_register&quot;: 1,
+    &quot;policies&quot;: 6,
+    &quot;notices&quot;: 2
+  },
+  &quot;open_questions&quot;: {
+    &quot;answered&quot;: 0,
+    &quot;total&quot;: 27
+  },
+  &quot;generated&quot;: &quot;2026-05-22&quot;
+}</pre>
+  </details>
+</main>
+<footer>
+  Generated 2026-05-22 by Judge Dredd · TRC standalone audit programme · <strong>Alfred / Polymarket is intentionally excluded</strong>.
+</footer>
+<script>
+  // Animate the ring after load
+  document.addEventListener('DOMContentLoaded', () => {
+    const fill = document.querySelector('.score-tile circle:nth-of-type(2)');
+    if (fill) {
+      const target = fill.getAttribute('stroke-dashoffset');
+      fill.setAttribute('stroke-dashoffset', '276');
+      requestAnimationFrame(() => { setTimeout(() => fill.setAttribute('stroke-dashoffset', target), 60); });
+    }
+  });
+</script>
+</body>
+</html>
