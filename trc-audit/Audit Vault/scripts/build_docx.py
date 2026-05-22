@@ -223,6 +223,12 @@ def main() -> int:
     if master:
         render_markdown(doc, master)
 
+    # 3. Evidence Plan — per project, per control, exact artefacts required
+    plan_path = VAULT_ROOT / "Compliance" / "Evidence Plan.md"
+    if plan_path.exists():
+        section_break(doc, "Evidence Plan")
+        render_markdown(doc, plan_path.read_text(encoding="utf-8"))
+
     # 3. Compliance artefacts, folder by folder
     compliance = load_compliance()
     for folder in COMPLIANCE_FOLDERS:

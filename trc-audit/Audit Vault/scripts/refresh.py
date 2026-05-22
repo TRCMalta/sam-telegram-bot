@@ -19,9 +19,11 @@ def run(script: str) -> int:
 
 
 def main() -> int:
+    # Evidence Plan must be built before the dashboard / docx, because they include it.
+    rc0 = run("build_evidence_plan.py")
     rc1 = run("build_docx.py")
     rc2 = run("build_dashboard.py")
-    return rc1 or rc2
+    return rc0 or rc1 or rc2
 
 
 if __name__ == "__main__":
