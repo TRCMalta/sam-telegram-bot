@@ -28,6 +28,38 @@ process.on('uncaughtException', (err) => {
   process.exit(1);
 });
 
+// ─── Generic helpers — timeout wrapper + structured logger ────────────────────
+// withTimeout: races a promise against a deadline, cleaning up the timer if
+// the promise wins. Use as a per-tool budget so a single hung upstream cannot
+// block the Claude tool-use loop indefinitely (the root cause class of the
+// May 19 2026 incident).
+function withTimeout(promise, ms, label) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(`${label} exceeded ${ms}ms budget`)),
+      ms,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
+// logEvent: single-line structured log emitter. Format:
+//   [KIND] key1=value1 key2=value2 ...
+// Designed to be greppable in Railway log search and parseable by ad-hoc
+// awk/jq pipelines if we ever ship logs to Logtail/Datadog. Long string
+// values are truncated to 200 chars so a misbehaving upstream cannot bloat
+// the log stream.
+function logEvent(kind, fields = {}) {
+  const parts = [`[${kind}]`];
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === undefined || v === null) continue;
+    const s = typeof v === 'string' ? v.replace(/\s+/g, ' ').slice(0, 200) : v;
+    parts.push(`${k}=${s}`);
+  }
+  console.log(parts.join(' '));
+}
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1881,8 +1913,16 @@ setInterval(() => {
 }, 10 * 60 * 1000);
 
 async function handleMessage(chatId, userMessage, userName, channel = 'telegram') {
+  const msgStartedAt = Date.now();
+  let toolCallCount = 0;
+  logEvent('MSG', {
+    chat: chatId,
+    channel,
+    user: userName,
+    len: userMessage.length,
+  });
   console.log(`[${channel.toUpperCase()}] Message from ${userName} (${chatId}): ${userMessage}`);
-  
+
   // Send typing indicator
   if (channel === 'telegram') {
     await sendTypingAction(chatId);
@@ -1918,14 +1958,32 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       const toolResults = [];
       for (const block of response.content) {
         if (block.type === 'tool_use') {
+          toolCallCount++;
+          const toolStartedAt = Date.now();
           console.log(`Calling tool: ${block.name}`, JSON.stringify(block.input).substring(0, 200));
           let result;
+          let toolOk = true;
           try {
-            result = await handleToolCall(block.name, block.input);
+            // 60s budget per tool call. Future-proofs against any new tool
+            // (or any existing tool's underlying upstream) hanging without
+            // its own AbortSignal. The May 19 outage class cannot recur
+            // even if a new tool ships without its own timeout.
+            result = await withTimeout(
+              handleToolCall(block.name, block.input),
+              60_000,
+              `tool '${block.name}'`,
+            );
           } catch (toolErr) {
+            toolOk = false;
             console.error(`Tool ${block.name} crashed: ${toolErr.message}`);
             result = `Tool ${block.name} failed: ${toolErr.message}`;
           }
+          logEvent('TOOL', {
+            chat: chatId,
+            tool: block.name,
+            wallMs: Date.now() - toolStartedAt,
+            ok: toolOk,
+          });
           toolResults.push({
             type: 'tool_result',
             tool_use_id: block.id,
@@ -1988,7 +2046,23 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
     } else {
       await sendTelegram(chatId, reply);
     }
+    logEvent('REPLY', {
+      chat: chatId,
+      channel,
+      wallMs: Date.now() - msgStartedAt,
+      tools: toolCallCount,
+      len: reply.length,
+      ok: true,
+    });
   } catch (err) {
+    logEvent('REPLY', {
+      chat: chatId,
+      channel,
+      wallMs: Date.now() - msgStartedAt,
+      tools: toolCallCount,
+      ok: false,
+      error: String(err?.message || err).slice(0, 200),
+    });
     console.error(`[ERROR] handleMessage [${channel}] ${chatId}:`, err?.status || err?.code || '', err?.message || err);
     let errorMsg;
     if (err?.status === 429) {
@@ -2049,14 +2123,137 @@ async function sendWhatsApp(to, text) {
   }
 }
 
+// ─── Upstream health pings (used by /healthz/deep + daily self-test) ─────────
+// Each ping is independently timeout-bounded and returns a structured result.
+// Promise.all in /healthz/deep runs them in parallel so one slow upstream
+// cannot block detection of another. Failures are returned, not thrown — the
+// caller decides aggregate status.
+
+async function pingClaude() {
+  const t = Date.now();
+  try {
+    // 10-token max response keeps the cost near zero (~$0.0001 per call) and
+    // forces the request to complete in a single round-trip.
+    const r = await anthropic.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 10,
+      messages: [{ role: 'user', content: 'pong' }],
+    });
+    return { ok: true, wallMs: Date.now() - t, model: r.model };
+  } catch (err) {
+    return { ok: false, wallMs: Date.now() - t, error: String(err.message || err).slice(0, 200) };
+  }
+}
+
+async function pingMsGraph() {
+  const t = Date.now();
+  try {
+    const token = await msGraphAuth();
+    return { ok: !!token, wallMs: Date.now() - t };
+  } catch (err) {
+    return { ok: false, wallMs: Date.now() - t, error: String(err.message || err).slice(0, 200) };
+  }
+}
+
+async function pingFirefish() {
+  const t = Date.now();
+  try {
+    const token = await firefishAuth();
+    return { ok: !!token, wallMs: Date.now() - t };
+  } catch (err) {
+    return { ok: false, wallMs: Date.now() - t, error: String(err.message || err).slice(0, 200) };
+  }
+}
+
+async function pingOdoo() {
+  const t = Date.now();
+  try {
+    const uid = await odooGetUid();
+    return { ok: !!uid, wallMs: Date.now() - t, uid };
+  } catch (err) {
+    return { ok: false, wallMs: Date.now() - t, error: String(err.message || err).slice(0, 200) };
+  }
+}
+
+async function pingWhatsApp() {
+  const t = Date.now();
+  try {
+    if (!WA_ACCESS_TOKEN || !WA_PHONE_NUMBER_ID) {
+      return { ok: false, wallMs: Date.now() - t, error: 'WA env not configured' };
+    }
+    // GET /<phone_number_id> returns the business profile. 401 surfaces token
+    // expiry — the suspected next silent-failure mode (60-day Meta user tokens).
+    const res = await fetch(
+      `https://graph.facebook.com/${WA_API_VERSION}/${WA_PHONE_NUMBER_ID}?fields=display_phone_number`,
+      {
+        headers: { Authorization: `Bearer ${WA_ACCESS_TOKEN}` },
+        signal: AbortSignal.timeout(8000),
+      },
+    );
+    if (!res.ok) {
+      const body = await res.text();
+      return {
+        ok: false,
+        wallMs: Date.now() - t,
+        status: res.status,
+        error: body.slice(0, 200),
+      };
+    }
+    return { ok: true, wallMs: Date.now() - t };
+  } catch (err) {
+    return { ok: false, wallMs: Date.now() - t, error: String(err.message || err).slice(0, 200) };
+  }
+}
+
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 app.get("/", (req, res) => {
+  // Kept cheap and unauthenticated so Railway healthchecks + the every-5-min
+  // milo-api Sam monitor can poll it without cost. Deep upstream tests live
+  // at /healthz/deep behind HEALTH_TOKEN.
   res.json({
     status: "ok",
     bot: "Sam TRC (Telegram + WhatsApp)",
     version: "2.0.0",
     uptime: process.uptime(),
+  });
+});
+
+app.get("/healthz/deep", async (req, res) => {
+  // Optional shared-secret guard. If HEALTH_TOKEN is unset, endpoint is open
+  // (acceptable on a private Railway URL but milo-api self-test should always
+  // pass the token so we can lock down later without breaking the cron).
+  const expected = process.env.HEALTH_TOKEN;
+  if (expected) {
+    const provided = req.get("x-health-token") || req.query.token;
+    if (provided !== expected) {
+      return res.status(401).json({ status: "unauthorised" });
+    }
+  }
+  const startedAt = Date.now();
+  const [claude, msGraph, firefish, odoo, whatsapp] = await Promise.all([
+    pingClaude(),
+    pingMsGraph(),
+    pingFirefish(),
+    pingOdoo(),
+    pingWhatsApp(),
+  ]);
+  const components = { claude, msGraph, firefish, odoo, whatsapp };
+  const allOk = Object.values(components).every((c) => c.ok);
+  logEvent("HEALTHZ_DEEP", {
+    status: allOk ? "ok" : "degraded",
+    wallMs: Date.now() - startedAt,
+    claude: claude.ok ? "ok" : "FAIL",
+    msGraph: msGraph.ok ? "ok" : "FAIL",
+    firefish: firefish.ok ? "ok" : "FAIL",
+    odoo: odoo.ok ? "ok" : "FAIL",
+    whatsapp: whatsapp.ok ? "ok" : "FAIL",
+  });
+  res.status(allOk ? 200 : 503).json({
+    status: allOk ? "ok" : "degraded",
+    bot: "Sam TRC",
+    wallMs: Date.now() - startedAt,
+    components,
   });
 });
 
