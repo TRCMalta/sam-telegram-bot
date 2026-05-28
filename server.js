@@ -15,6 +15,19 @@ import http from "http";
 const app = express();
 app.use(express.json());
 
+// ─── Crash-safe process-level handlers ────────────────────────────────────────
+// Prevent silent zombie state when an upstream await hangs or rejects without
+// a local catch. Fail fast so Railway restarts the container instead of
+// leaving the event loop wedged (root cause of May 19 2026 outage).
+process.on('unhandledRejection', (err) => {
+  console.error('[FATAL] Unhandled rejection:', err && err.stack ? err.stack : err);
+  process.exit(1);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err && err.stack ? err.stack : err);
+  process.exit(1);
+});
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -53,8 +66,9 @@ const ALLOWED_WA_NUMBERS = (process.env.ALLOWED_WA_NUMBERS || BEVERLY_WA_NUMBER 
   .split(',').map(s => s.trim()).filter(Boolean);
 const processedWAMessages = new Set();
 
-// Claude client
-const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+// Claude client — 60s hard timeout prevents event-loop wedge on Anthropic API
+// hang. Surfaces as a thrown error caught in handleMessage's try/catch.
+const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY, timeout: 60000 });
 
 // ─── Beverly's System Prompt ──────────────────────────────────────────────────
 // Malta timezone helpers
@@ -744,6 +758,9 @@ async function msGraphGet(path) {
 
 async function msGraphPost(path, body) {
   const token = await msGraphAuth();
+  // 30s hard timeout — matches fetchJSON helper. Suspected hang site for
+  // May 19 2026 outage (last successful log was create_beverly_calendar_event,
+  // which calls this function without a previous timeout guard).
   const res = await fetch("https://graph.microsoft.com/v1.0" + path, {
     method: "POST",
     headers: {
@@ -751,6 +768,7 @@ async function msGraphPost(path, body) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30000),
   });
   if (res.status === 202 || res.status === 204) return { success: true };
   const text = await res.text();
