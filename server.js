@@ -88,6 +88,25 @@ const ALLOWED_USERS = (process.env.ALLOWED_TELEGRAM_USERS || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
+// Admin Telegram chat IDs — receive operator-level alerts from Sam (e.g.
+// milo-api watchdog firing, boot notifications, crash-loop signals).
+// Falls back to ALLOWED_TELEGRAM_USERS so existing deployments alert the
+// same humans without needing a new env var.
+const ADMIN_TELEGRAM_CHAT_IDS = (
+  process.env.ADMIN_TELEGRAM_CHAT_IDS || process.env.ALLOWED_TELEGRAM_USERS || ""
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// Reverse watchdog target. Sam pings milo-api so the two services
+// monitor each other — bulletproofing against the case where milo-api
+// (the primary Sam monitor) is the one that dies. Set MILO_HEALTH_URL
+// to override; default points at production milo-api.
+const MILO_HEALTH_URL =
+  process.env.MILO_HEALTH_URL
+  || "https://milo-api-production-51c3.up.railway.app/api/health";
+
 // WhatsApp Cloud API config
 const WA_ACCESS_TOKEN = process.env.WA_ACCESS_TOKEN;
 const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
@@ -1198,6 +1217,32 @@ async function sendTelegram(chatId, text) {
   }
 }
 
+/**
+ * Fan out an operator-level alert to every configured admin chat via
+ * Telegram. Independent of Resend/email transports — so a Resend outage
+ * cannot silence Sam's own alerts. Failures per recipient are logged
+ * but never thrown, so a single dead chat id cannot block delivery to
+ * the others.
+ */
+async function alertAdmin(text) {
+  if (ADMIN_TELEGRAM_CHAT_IDS.length === 0) {
+    console.warn(`[ALERT] ADMIN_TELEGRAM_CHAT_IDS empty — dropping alert: ${text.slice(0, 200)}`);
+    return;
+  }
+  if (!TELEGRAM_TOKEN) {
+    console.warn(`[ALERT] TELEGRAM_TOKEN missing — dropping alert: ${text.slice(0, 200)}`);
+    return;
+  }
+  for (const chatId of ADMIN_TELEGRAM_CHAT_IDS) {
+    try {
+      await sendTelegram(chatId, text);
+      logEvent('ALERT_SENT', { chat: chatId, len: text.length });
+    } catch (err) {
+      console.error(`[ALERT] Failed to deliver to chat ${chatId}: ${err.message}`);
+    }
+  }
+}
+
 async function sendTypingAction(chatId) {
   try {
     await fetchJSON(
@@ -1912,6 +1957,77 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
+// ─── Reverse watchdog — Sam monitors milo-api ────────────────────────────────
+// milo-api runs the primary every-5-min Sam health monitor. If milo-api
+// itself dies, no one alerts on Sam — Beverly would still get replies for
+// a while but the safety net is gone. This reverse watchdog closes the
+// loop: Sam pings milo-api every 5 minutes and Telegram-alerts the admin
+// chat list after 2 consecutive misses. Mutual monitoring means at least
+// one of the two services has to fail-with-no-alert simultaneously for
+// silence to persist undetected, which combined with an external
+// uptime monitor (cron-job.org / UptimeRobot, see ops doc) is the
+// bulletproof tier.
+const miloWatchdog = {
+  consecutiveFailures: 0,
+  isDown: false,
+  lastAlertAt: 0,
+};
+const MILO_WATCHDOG_FAIL_THRESHOLD = 2;
+const MILO_WATCHDOG_ALERT_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour while down
+setInterval(async () => {
+  let ok = false;
+  let detail = '';
+  const t = Date.now();
+  try {
+    const res = await fetch(MILO_HEALTH_URL, {
+      method: 'GET',
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      detail = `HTTP ${res.status} after ${Date.now() - t}ms`;
+    } else {
+      ok = true;
+    }
+  } catch (err) {
+    detail = err.name === 'TimeoutError' || err.name === 'AbortError'
+      ? `Timeout after ${Date.now() - t}ms`
+      : `Fetch error: ${err.message}`;
+  }
+  if (ok) {
+    if (miloWatchdog.isDown) {
+      miloWatchdog.isDown = false;
+      miloWatchdog.consecutiveFailures = 0;
+      logEvent('MILO_RECOVERED', { wallMs: Date.now() - t });
+      await alertAdmin('Milo-api recovered — Sam monitor is back online.');
+    }
+    miloWatchdog.consecutiveFailures = 0;
+    return;
+  }
+  miloWatchdog.consecutiveFailures++;
+  logEvent('MILO_FAILED', {
+    consec: miloWatchdog.consecutiveFailures,
+    detail: detail.slice(0, 200),
+  });
+  const justCrossed =
+    !miloWatchdog.isDown && miloWatchdog.consecutiveFailures >= MILO_WATCHDOG_FAIL_THRESHOLD;
+  const cooldownElapsed =
+    miloWatchdog.isDown && Date.now() - miloWatchdog.lastAlertAt > MILO_WATCHDOG_ALERT_COOLDOWN_MS;
+  if (justCrossed || cooldownElapsed) {
+    if (justCrossed) miloWatchdog.isDown = true;
+    miloWatchdog.lastAlertAt = Date.now();
+    await alertAdmin(
+      `*Milo-api watchdog: DOWN*\n\n`
+      + `URL: ${MILO_HEALTH_URL}\n`
+      + `Detail: ${detail}\n`
+      + `Consecutive failures: ${miloWatchdog.consecutiveFailures}\n\n`
+      + `Sam-monitor (the primary alert path for Sam outages) is offline. `
+      + `Sam itself is still healthy if you got this message, but if Sam *also* goes down `
+      + `between now and milo-api recovery, only the external uptime monitor will catch it. `
+      + `Open Railway dashboard, project feisty-vision, service milo-api, and check the deploy / logs.`,
+    );
+  }
+}, 5 * 60 * 1000);
+
 async function handleMessage(chatId, userMessage, userName, channel = 'telegram') {
   const msgStartedAt = Date.now();
   let toolCallCount = 0;
@@ -2607,4 +2723,14 @@ app.listen(PORT, () => {
   console.log(`Telegram: ${TELEGRAM_TOKEN ? "configured" : "NOT SET"}`);
   console.log(`WhatsApp: ${WA_ACCESS_TOKEN ? 'configured' : 'NOT SET'} (Phone ID: ${WA_PHONE_NUMBER_ID || 'NOT SET'})`);
   console.log(`Microsoft 365: ${MS_CLIENT_ID ? 'configured' : 'NOT SET'} (Email: ${BEVERLY_EMAIL})`);
+  // Structured boot event — operator can grep `[BOOT]` to count restarts per
+  // hour/day and spot crash loops in Railway log search. Frequent BOOT lines
+  // = trouble even if the every-5-min health monitor never alerted.
+  logEvent('BOOT', {
+    bootedAtIso: new Date().toISOString(),
+    port: PORT,
+    model: CLAUDE_MODEL,
+    adminAlertChats: ADMIN_TELEGRAM_CHAT_IDS.length,
+    miloWatchdogTarget: MILO_HEALTH_URL,
+  });
 });
