@@ -11,6 +11,7 @@ import express from "express";
 import { Anthropic } from "@anthropic-ai/sdk";
 import https from "https";
 import http from "http";
+import { readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync } from "fs";
 
 const app = express();
 app.use(express.json());
@@ -2027,6 +2028,117 @@ setInterval(async () => {
     );
   }
 }, 5 * 60 * 1000);
+
+// ─── Beverly's proactive morning briefing — 07:00 Europe/Malta daily ─────────
+// Sam initiates a short fresh greeting + "what can I help with today" prompt
+// to Beverly every morning. Voice handled by Claude using Sam's full system
+// prompt — never canned text. Last-sent date persisted to /tmp so an
+// in-window restart doesn't double-fire (Sam has no Railway volume; worst
+// case after a long restart is Beverly receives two briefings, acceptable).
+//
+// Time check runs every minute. setInterval is good enough — daily fire
+// doesn't need sub-second precision, and the >=07:00 / <07:05 window
+// tolerates the ~60s tick drift plus a slow Claude response.
+const MORNING_STATE_FILE = '/tmp/sam-last-morning.json';
+const MORNING_HOUR_MALTA = 7;
+
+function readLastMorningDate() {
+  try {
+    const raw = fsReadFileSync(MORNING_STATE_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    return typeof parsed.lastSentDate === 'string' ? parsed.lastSentDate : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastMorningDate(dateStr) {
+  try {
+    fsWriteFileSync(MORNING_STATE_FILE, JSON.stringify({ lastSentDate: dateStr }), 'utf8');
+  } catch (err) {
+    console.error(`[MORNING] Failed to persist state: ${err.message}`);
+  }
+}
+
+let lastMorningSent = readLastMorningDate();
+logEvent('MORNING_INIT', { lastSentDate: lastMorningSent || 'never' });
+
+// Returns { dateIso: 'YYYY-MM-DD', hour: number, minute: number } in Malta tz.
+function getMaltaClockParts() {
+  const fmt = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Malta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(new Date()).map(p => [p.type, p.value]));
+  return {
+    dateIso: `${parts.year}-${parts.month}-${parts.day}`,
+    hour: parseInt(parts.hour, 10),
+    minute: parseInt(parts.minute, 10),
+  };
+}
+
+async function sendBeverlyMorningBriefing() {
+  if (!BEVERLY_WA_NUMBER) {
+    logEvent('MORNING_SKIP', { reason: 'BEVERLY_WA_NUMBER not set' });
+    return;
+  }
+  const t = Date.now();
+  try {
+    const response = await anthropic.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 250,
+      system: buildSystemPrompt(),
+      messages: [
+        {
+          role: 'user',
+          content:
+            "[PROACTIVE MORNING TRIGGER — Beverly hasn't messaged you, you're initiating.] "
+            + "Send Beverly a short morning greeting and offer to help with something specific today. "
+            + "Lead with \"Good morning, Beverly.\" Then in one sharp sentence offer a specific way you can help — "
+            + "pick one from: pulling her schedule for today, reviewing flagged emails, summarising the recruitment pipeline, "
+            + "checking activity from a key client, drafting outreach. End with one open question inviting her to redirect you "
+            + "to whatever matters most. Max 4 sentences total. No filler, no AI-isms, no exclamation marks beyond the greeting.",
+        },
+      ],
+    });
+    let text = '';
+    for (const block of response.content) {
+      if (block.type === 'text') text += block.text;
+    }
+    if (!text) {
+      logEvent('MORNING_FAIL', { reason: 'empty Claude response', wallMs: Date.now() - t });
+      return;
+    }
+    await sendWhatsApp(BEVERLY_WA_NUMBER, text);
+    logEvent('MORNING_SENT', { len: text.length, wallMs: Date.now() - t });
+  } catch (err) {
+    logEvent('MORNING_FAIL', {
+      error: String(err.message || err).slice(0, 200),
+      wallMs: Date.now() - t,
+    });
+  }
+}
+
+setInterval(async () => {
+  try {
+    const { dateIso, hour, minute } = getMaltaClockParts();
+    if (hour !== MORNING_HOUR_MALTA || minute > 4) return;
+    if (lastMorningSent === dateIso) return;
+    // Mark sent BEFORE the await so a concurrent tick (impossible at 1-min
+    // resolution but defensive) doesn't double-fire.
+    lastMorningSent = dateIso;
+    writeLastMorningDate(dateIso);
+    logEvent('MORNING_FIRE', { maltaDate: dateIso, maltaHour: hour, maltaMinute: minute });
+    await sendBeverlyMorningBriefing();
+  } catch (err) {
+    console.error(`[MORNING] tick error: ${err.message}`);
+  }
+}, 60 * 1000);
 
 async function handleMessage(chatId, userMessage, userName, channel = 'telegram') {
   const msgStartedAt = Date.now();
