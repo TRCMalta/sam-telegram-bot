@@ -65,7 +65,7 @@ function logEvent(kind, fields = {}) {
 const PORT = process.env.PORT || 3000;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-20250514";
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "claude-sonnet-4-6";
 
 // Firefish
 const FIREFISH_CLIENT_ID = process.env.FIREFISH_CLIENT_ID;
@@ -2166,7 +2166,7 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
 
     // First Claude call WITH tools
     let response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: CLAUDE_MODEL,
       max_tokens: 4096,
       system: buildSystemPrompt(),
       tools: SAM_TOOLS,
@@ -2229,7 +2229,7 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       }
 
       response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: CLAUDE_MODEL,
         max_tokens: 4096,
         system: buildSystemPrompt(),
         tools: SAM_TOOLS,
@@ -2243,7 +2243,7 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       messages.push({ role: 'assistant', content: response.content });
       messages.push({ role: 'user', content: [{ type: 'text', text: 'Please summarise what you found so far and give Beverly the best answer you can with the information gathered. Do not call any more tools.' }] });
       response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: CLAUDE_MODEL,
         max_tokens: 4096,
         system: buildSystemPrompt(),
         messages
