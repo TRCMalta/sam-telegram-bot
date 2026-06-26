@@ -2029,7 +2029,7 @@ setInterval(async () => {
   }
 }, 5 * 60 * 1000);
 
-// ─── Beverly's proactive morning briefing — 07:00 Europe/Malta daily ─────────
+// ─── Beverly's proactive morning briefing — 08:00 Europe/Malta daily ─────────
 // Sam initiates a short fresh greeting + "what can I help with today" prompt
 // to Beverly every morning. Voice handled by Claude using Sam's full system
 // prompt — never canned text. Last-sent date persisted to /tmp so an
@@ -2037,10 +2037,10 @@ setInterval(async () => {
 // case after a long restart is Beverly receives two briefings, acceptable).
 //
 // Time check runs every minute. setInterval is good enough — daily fire
-// doesn't need sub-second precision, and the >=07:00 / <07:05 window
+// doesn't need sub-second precision, and the >=08:00 / <08:05 window
 // tolerates the ~60s tick drift plus a slow Claude response.
 const MORNING_STATE_FILE = '/tmp/sam-last-morning.json';
-const MORNING_HOUR_MALTA = 7;
+const MORNING_HOUR_MALTA = 8;
 
 function readLastMorningDate() {
   try {
@@ -2136,8 +2136,8 @@ async function sendBeverlyMorningBriefing() {
   }
 }
 
-// Catch-up: if the 07:00 window was missed (process restart / event-loop wedge
-// across 07:00–07:04, or a transient send failure), still deliver later the
+// Catch-up: if the 08:00 window was missed (process restart / event-loop wedge
+// across 08:00–08:04, or a transient send failure), still deliver later the
 // same morning rather than skipping the whole day. Retries are throttled and
 // the admin is alerted at most once per day so a persistent failure (e.g. a
 // closed 24h WhatsApp window or an expired token) is visible, not silent.
