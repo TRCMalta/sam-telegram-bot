@@ -2082,10 +2082,14 @@ function getMaltaClockParts() {
   };
 }
 
+// Returns { ok, reason } so the scheduler can decide whether to retry / alert.
+// Never throws. Does NOT touch the persisted last-sent date — that is the
+// caller's job, and only on { ok: true }, so a failure leaves the day open
+// for a catch-up retry instead of being silently marked done.
 async function sendBeverlyMorningBriefing() {
   if (!BEVERLY_WA_NUMBER) {
     logEvent('MORNING_SKIP', { reason: 'BEVERLY_WA_NUMBER not set' });
-    return;
+    return { ok: false, reason: 'BEVERLY_WA_NUMBER not set' };
   }
   const t = Date.now();
   try {
@@ -2112,29 +2116,78 @@ async function sendBeverlyMorningBriefing() {
     }
     if (!text) {
       logEvent('MORNING_FAIL', { reason: 'empty Claude response', wallMs: Date.now() - t });
-      return;
+      return { ok: false, reason: 'empty Claude response' };
     }
-    await sendWhatsApp(BEVERLY_WA_NUMBER, text);
+    const send = await sendWhatsApp(BEVERLY_WA_NUMBER, text);
+    if (!send.ok) {
+      logEvent('MORNING_FAIL', {
+        reason: 'whatsapp delivery failed',
+        error: send.error,
+        wallMs: Date.now() - t,
+      });
+      return { ok: false, reason: `WhatsApp delivery failed: ${send.error}` };
+    }
     logEvent('MORNING_SENT', { len: text.length, wallMs: Date.now() - t });
+    return { ok: true };
   } catch (err) {
-    logEvent('MORNING_FAIL', {
-      error: String(err.message || err).slice(0, 200),
-      wallMs: Date.now() - t,
-    });
+    const reason = String(err.message || err).slice(0, 200);
+    logEvent('MORNING_FAIL', { error: reason, wallMs: Date.now() - t });
+    return { ok: false, reason };
   }
 }
+
+// Catch-up: if the 07:00 window was missed (process restart / event-loop wedge
+// across 07:00–07:04, or a transient send failure), still deliver later the
+// same morning rather than skipping the whole day. Retries are throttled and
+// the admin is alerted at most once per day so a persistent failure (e.g. a
+// closed 24h WhatsApp window or an expired token) is visible, not silent.
+const MORNING_CATCHUP_UNTIL_HOUR_MALTA = 10; // catch up through 10:59 Malta
+const MORNING_RETRY_THROTTLE_MS = 10 * 60 * 1000;
+let morningInFlight = false;
+let lastMorningAttemptMs = 0;
+let morningFailAlertedDate = null;
 
 setInterval(async () => {
   try {
     const { dateIso, hour, minute } = getMaltaClockParts();
-    if (hour !== MORNING_HOUR_MALTA || minute > 4) return;
-    if (lastMorningSent === dateIso) return;
-    // Mark sent BEFORE the await so a concurrent tick (impossible at 1-min
-    // resolution but defensive) doesn't double-fire.
-    lastMorningSent = dateIso;
-    writeLastMorningDate(dateIso);
-    logEvent('MORNING_FIRE', { maltaDate: dateIso, maltaHour: hour, maltaMinute: minute });
-    await sendBeverlyMorningBriefing();
+    if (lastMorningSent === dateIso) return; // already delivered today
+    if (morningInFlight) return;             // an attempt is in progress
+
+    const inPrimaryWindow = hour === MORNING_HOUR_MALTA && minute <= 4;
+    const inCatchupWindow =
+      hour > MORNING_HOUR_MALTA && hour <= MORNING_CATCHUP_UNTIL_HOUR_MALTA;
+    if (!inPrimaryWindow && !inCatchupWindow) return;
+
+    // Throttle retries after a failure so we don't hammer Claude/WhatsApp every
+    // minute through the catch-up window. The first attempt of the day is not
+    // throttled (lastMorningAttemptMs starts at 0).
+    if (Date.now() - lastMorningAttemptMs < MORNING_RETRY_THROTTLE_MS) return;
+
+    morningInFlight = true;
+    lastMorningAttemptMs = Date.now();
+    logEvent('MORNING_FIRE', {
+      maltaDate: dateIso,
+      maltaHour: hour,
+      maltaMinute: minute,
+      catchup: !inPrimaryWindow,
+    });
+    try {
+      const result = await sendBeverlyMorningBriefing();
+      if (result.ok) {
+        // Persist ONLY on confirmed delivery so a failure stays retryable.
+        lastMorningSent = dateIso;
+        writeLastMorningDate(dateIso);
+      } else if (morningFailAlertedDate !== dateIso) {
+        morningFailAlertedDate = dateIso;
+        await alertAdmin(
+          `⚠️ Sam's morning briefing to Beverly did not go out (${dateIso}, ` +
+          `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} Malta). ` +
+          `Reason: ${result.reason}. Will keep retrying until 11:00 Malta.`
+        );
+      }
+    } finally {
+      morningInFlight = false;
+    }
   } catch (err) {
     console.error(`[MORNING] tick error: ${err.message}`);
   }
@@ -2319,6 +2372,11 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
 
 
 // ─── WhatsApp Sending ─────────────────────────────────────
+// Returns { ok, error }. Callers that don't care about delivery success can
+// ignore the return value (behaviour unchanged — failures are still logged and
+// never throw). The morning briefing DOES care: a swallowed failure here used
+// to make a proactive message look "sent" when Meta had actually rejected it
+// (e.g. expired token, or the 24h customer-care window being closed).
 async function sendWhatsApp(to, text) {
   const chunks = [];
   let remaining = text;
@@ -2326,6 +2384,7 @@ async function sendWhatsApp(to, text) {
     chunks.push(remaining.substring(0, 4000));
     remaining = remaining.substring(4000);
   }
+  let error = null;
   for (const chunk of chunks) {
     try {
       await fetchJSON(
@@ -2346,9 +2405,11 @@ async function sendWhatsApp(to, text) {
         }
       );
     } catch (err) {
-      console.error('WhatsApp send error:', err.message);
+      error = String(err.message || err).slice(0, 300);
+      console.error('WhatsApp send error:', error);
     }
   }
+  return { ok: error === null, error };
 }
 
 // ─── Upstream health pings (used by /healthz/deep + daily self-test) ─────────
