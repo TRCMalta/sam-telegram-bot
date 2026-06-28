@@ -12,6 +12,7 @@ import { Anthropic } from "@anthropic-ai/sdk";
 import https from "https";
 import http from "http";
 import { readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync } from "fs";
+import { maltaPublicHoliday } from "./malta-holidays.js";
 
 const app = express();
 app.use(express.json());
@@ -2124,6 +2125,56 @@ async function sendBeverlyMorningBriefing() {
   }
 }
 
+// One-off, date-specific lines to weave into a given day's holiday greeting,
+// keyed by Malta date 'YYYY-MM-DD'. These are NOT recurring — a key only ever
+// matches its single calendar date, so it's safe to leave past dates here or
+// prune them. Use for a personal touch that shouldn't fire on every holiday.
+const HOLIDAY_GREETING_NOTES = {
+  '2026-06-29': "Wonderful speech yesterday at the Mediterrané film awards! You smashed it!",
+};
+
+// On a Maltese public holiday Beverly is off, so skip the schedule/pipeline
+// briefing and send a warm greeting instead — generated in Sam's voice, with a
+// canned fallback so she still hears from Sam (and gets any one-off note) even
+// if the Claude call fails. `dateIso` is the Malta calendar day 'YYYY-MM-DD'.
+async function sendBeverlyHolidayGreeting(holiday, dateIso) {
+  if (!BEVERLY_WA_NUMBER) {
+    logEvent('MORNING_SKIP', { reason: 'BEVERLY_WA_NUMBER not set', mode: 'holiday' });
+    return;
+  }
+  const note = HOLIDAY_GREETING_NOTES[dateIso] || null;
+  const t = Date.now();
+  let text = '';
+  try {
+    const trigger =
+      `[PROACTIVE HOLIDAY TRIGGER — today is ${holiday}, a public holiday in Malta. `
+      + `Beverly hasn't messaged you; you're initiating. Do NOT send the usual schedule or pipeline briefing.] `
+      + `Wish Beverly a warm, brief happy ${holiday}, tell her to enjoy the day off, and that you'll be back with her briefing tomorrow. `
+      + `Lead with "Good morning, Beverly." Max 3 sentences.`
+      + (note ? ` You MUST also include this exact sentence, word for word, right after the greeting: "${note}"` : '');
+    const response = await anthropic.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 250,
+      system: buildSystemPrompt(),
+      messages: [{ role: 'user', content: trigger }],
+    });
+    for (const block of response.content) {
+      if (block.type === 'text') text += block.text;
+    }
+  } catch (err) {
+    logEvent('MORNING_FAIL', { mode: 'holiday', error: String(err.message || err).slice(0, 200), wallMs: Date.now() - t });
+  }
+  // Canned fallback — guarantees delivery (and the one-off note) if Claude
+  // errored or returned empty.
+  if (!text) {
+    text = `Good morning, Beverly.`
+      + (note ? ` ${note}` : '')
+      + ` Happy ${holiday} — it's a public holiday in Malta today, so no briefing from me. Enjoy the day off and I'll be back tomorrow.`;
+  }
+  await sendWhatsApp(BEVERLY_WA_NUMBER, text);
+  logEvent('MORNING_SENT', { mode: 'holiday', holiday, note: Boolean(note), len: text.length, wallMs: Date.now() - t });
+}
+
 setInterval(async () => {
   try {
     const { dateIso, hour, minute } = getMaltaClockParts();
@@ -2134,7 +2185,16 @@ setInterval(async () => {
     lastMorningSent = dateIso;
     writeLastMorningDate(dateIso);
     logEvent('MORNING_FIRE', { maltaDate: dateIso, maltaHour: hour, maltaMinute: minute });
-    await sendBeverlyMorningBriefing();
+    // On a Maltese public holiday, send a greeting instead of the briefing.
+    // Build the Date from the Malta calendar parts so the holiday lookup reads
+    // the right day regardless of the server's own timezone.
+    const [hy, hm, hd] = dateIso.split('-').map(Number);
+    const holiday = maltaPublicHoliday(new Date(hy, hm - 1, hd));
+    if (holiday) {
+      await sendBeverlyHolidayGreeting(holiday, dateIso);
+    } else {
+      await sendBeverlyMorningBriefing();
+    }
   } catch (err) {
     console.error(`[MORNING] tick error: ${err.message}`);
   }
