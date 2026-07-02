@@ -2369,6 +2369,7 @@ async function sendVoiceReply(to, text) {
 }
 
 async function sendWhatsApp(to, text) {
+  const dest = String(to).replace(/^wa_/, ""); // handleMessage keys WA chats as wa_<number>
   const chunks = [];
   let remaining = text;
   while (remaining.length > 0) {
@@ -2388,7 +2389,7 @@ async function sendWhatsApp(to, text) {
           body: JSON.stringify({
             messaging_product: 'whatsapp',
             recipient_type: 'individual',
-            to: to,
+            to: dest,
             type: 'text',
             text: { body: chunk },
           }),
