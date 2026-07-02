@@ -12,6 +12,7 @@ import { Anthropic } from "@anthropic-ai/sdk";
 import https from "https";
 import http from "http";
 import { readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync } from "fs";
+import { synthesizeWhatsappVoice } from "./lib/voice.js";
 
 const app = express();
 app.use(express.json());
@@ -2115,6 +2116,8 @@ async function sendBeverlyMorningBriefing() {
       return;
     }
     await sendWhatsApp(BEVERLY_WA_NUMBER, text);
+    // Morning brief always goes out in BOTH text and voice (Jonathan's rule).
+    await sendVoiceReply(BEVERLY_WA_NUMBER, text);
     logEvent('MORNING_SENT', { len: text.length, wallMs: Date.now() - t });
   } catch (err) {
     logEvent('MORNING_FAIL', {
@@ -2271,6 +2274,11 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
 
     if (channel === 'whatsapp') {
       await sendWhatsApp(chatId, reply);
+      // Reply-to-voice: if Beverly approached Sam by voice note, answer with
+      // voice too (text already sent above). Guarded — audio failure = text only.
+      if (typeof userMessage === 'string' && userMessage.startsWith('[Voice message]')) {
+        await sendVoiceReply(chatId, reply);
+      }
     } else {
       await sendTelegram(chatId, reply);
     }
@@ -2319,6 +2327,47 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
 
 
 // ─── WhatsApp Sending ─────────────────────────────────────
+// Strip markdown so TTS reads clean prose (Sam has no stripMarkdown util).
+function stripForVoice(text) {
+  return String(text || "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/(\*|_)(.*?)\1/g, "$2")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// Send an OGG/Opus buffer as a WhatsApp voice note (media upload + audio msg).
+async function sendWhatsAppVoice(to, oggBuffer) {
+  const dest = String(to).replace(/^wa_/, ""); // handleMessage keys WA chats as wa_<number>
+  const form = new FormData();
+  form.append("messaging_product", "whatsapp");
+  form.append("file", new Blob([oggBuffer], { type: "audio/ogg" }), "sam.ogg");
+  const up = await fetch(`https://graph.facebook.com/${WA_API_VERSION}/${WA_PHONE_NUMBER_ID}/media`, {
+    method: "POST", headers: { Authorization: `Bearer ${WA_ACCESS_TOKEN}` }, body: form,
+  });
+  const uj = await up.json();
+  if (!up.ok || !uj.id) throw new Error(`media upload failed: ${up.status} ${JSON.stringify(uj).slice(0, 150)}`);
+  const send = await fetch(`https://graph.facebook.com/${WA_API_VERSION}/${WA_PHONE_NUMBER_ID}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${WA_ACCESS_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ messaging_product: "whatsapp", to: dest, type: "audio", audio: { id: uj.id } }),
+  });
+  if (!send.ok) throw new Error(`audio send failed: ${send.status} ${(await send.text()).slice(0, 150)}`);
+}
+
+// Synth text → WhatsApp voice note, fully guarded (never throws to the caller).
+async function sendVoiceReply(to, text) {
+  try {
+    const ogg = await synthesizeWhatsappVoice(stripForVoice(text));
+    if (ogg) { await sendWhatsAppVoice(to, ogg); console.log(`[VOICE] Sam voice sent to ${to} (${ogg.length}b)`); }
+    else console.warn("[VOICE] synthesis returned null — text only");
+  } catch (e) { console.error("[VOICE] Sam voice reply failed:", e.message); }
+}
+
 async function sendWhatsApp(to, text) {
   const chunks = [];
   let remaining = text;
