@@ -2,12 +2,31 @@
 
 This repo (Sam) deploys to Railway project **cheerful-connection** (service: sam-telegram-bot).
 
+Despite the service name, Sam serves **both Telegram and WhatsApp** (with voice
+replies on WhatsApp).
+
+## Required addition: Postgres
+
+Sam now needs a Postgres service in `cheerful-connection` for durable memory,
+open items, and Beverly's portfolio and trade journal.
+
+1. **New → Database → PostgreSQL** in this project.
+2. On the **sam-telegram-bot** service, add a variable
+   `DATABASE_URL` = `${{Postgres.DATABASE_URL}}`. Railway does NOT wire this
+   across services automatically — the database alone does nothing until Sam
+   holds the reference.
+3. Redeploy. Sam creates its schema on boot and logs `[DB] schema ready`.
+
+Without it Sam still runs, but forgets everything on each redeploy and the
+memory, portfolio and journal tools report storage unavailable. See
+`CAPABILITIES.md` for the full environment reference.
+
 ## Full Railway map (TRC, audited 2026-06-29)
 
 | Railway project | Service(s) | Agent / purpose |
 |---|---|---|
 | spirited-healing | web + 4×Postgres | Kim — Think Talent WhatsApp bot |
-| cheerful-connection | sam-telegram-bot | Sam — Telegram bot |
+| cheerful-connection | sam-telegram-bot (+ Postgres) | Sam — Beverly's chief of staff, Telegram + WhatsApp |
 | don-cos | don-telegram-bot | Don — Telegram bot |
 | feisty-vision | milo-api, gordon, function-bun | Milo — Ceek recruitment intake |
 | barry | barry-app | Barry — TRC CMO LinkedIn agent |
