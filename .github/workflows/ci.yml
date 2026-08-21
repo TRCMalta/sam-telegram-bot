@@ -74,7 +74,7 @@ jobs:
           - 5432:5432
         # Without this the job races the container and fails on connect.
         options: >-
-          --health-cmd "pg_isready -U sam"
+          --health-cmd "pg_isready -U sam -d sam_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -110,7 +110,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U sam"
+          --health-cmd "pg_isready -U sam -d sam_smoke"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10

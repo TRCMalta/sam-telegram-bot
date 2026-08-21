@@ -19,16 +19,28 @@ const PORT = Number(process.env.SMOKE_PORT || 3971);
 let failures = 0;
 const ok = (cond, msg) => { console.log(`${cond ? "PASS" : "FAIL"}  ${msg}`); if (!cond) failures++; };
 
-async function waitForHealth(port, timeoutMs = 25_000) {
+/**
+ * Wait for the server to finish booting, then read its capabilities.
+ *
+ * Polling the HTTP endpoint alone is not enough: express starts accepting
+ * connections the instant app.listen() is called, so a 200 can arrive before
+ * boot has finished and the capability flags would read false for things that
+ * are merely still initialising. The [BOOT] log line is emitted last, so it is
+ * the honest "fully up" signal. Waiting on it makes this test deterministic
+ * instead of a race.
+ */
+async function waitForBoot(getOutput, port, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/healthz/capabilities`, {
-        signal: AbortSignal.timeout(2000),
-      });
-      if (res.ok) return await res.json();
-    } catch { /* not up yet */ }
-    await new Promise((r) => setTimeout(r, 500));
+    if (/\[BOOT\]/.test(getOutput())) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/healthz/capabilities`, {
+          signal: AbortSignal.timeout(3000),
+        });
+        if (res.ok) return await res.json();
+      } catch { /* listener not accepting yet */ }
+    }
+    await new Promise((r) => setTimeout(r, 250));
   }
   return null;
 }
@@ -53,7 +65,7 @@ async function bootAndProbe(label, extraEnv, port) {
   let crashed = false;
   child.on("exit", (code) => { if (code !== 0 && code !== null) crashed = true; });
 
-  const caps = await waitForHealth(port);
+  const caps = await waitForBoot(() => out, port);
   const result = { caps, out, crashed };
 
   child.kill("SIGKILL");
@@ -69,7 +81,7 @@ async function bootAndProbe(label, extraEnv, port) {
     PORT,
   );
   ok(!crashed, "process did not exit with an error");
-  ok(caps !== null, "server came up and served /healthz/capabilities");
+  ok(caps !== null, "server finished booting and served /healthz/capabilities");
   if (caps) {
     ok(caps.tools > 0, `tools registered (${caps.tools})`);
     ok(caps.capabilities.durableMemory === false, "durable memory correctly reported off");

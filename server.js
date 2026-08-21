@@ -3533,7 +3533,20 @@ app.get("/webhook-info", async (req, res) => {
 if (!ANTHROPIC_API_KEY) { console.error("FATAL: ANTHROPIC_API_KEY not set. Exiting."); process.exit(1); }
 if (!TELEGRAM_TOKEN && !WA_ACCESS_TOKEN) { console.error("FATAL: Neither TELEGRAM_TOKEN nor WA_ACCESS_TOKEN set. Exiting."); process.exit(1); }
 
-app.listen(PORT, async () => {
+// Storage comes up BEFORE we accept traffic.
+//
+// app.listen() starts serving the moment it is called, so initialising inside
+// its callback leaves a window where /healthz/capabilities reports durable
+// memory as unavailable when it is merely not ready yet. A platform
+// healthcheck landing in that window sees a degraded deploy, and Sam would
+// answer his first message with no memory attached.
+//
+// This is bounded, not a hang risk: initDb() swallows its own errors and the
+// pool carries a 10s connect timeout, so an unreachable database delays boot
+// briefly and then Sam serves memory-only exactly as before.
+const dbUp = await initDb();
+
+app.listen(PORT, () => {
   console.log(`Sam TRC bot running on port ${PORT}`);
   console.log(`Firefish: ${FIREFISH_CLIENT_ID ? "configured" : "NOT SET"}`);
   console.log(`Odoo: ${ODOO_API_KEY ? "configured" : "NOT SET"} (db=${ODOO_DB}, login=${ODOO_LOGIN || "not set"})`);
@@ -3549,13 +3562,9 @@ app.listen(PORT, async () => {
   console.log(`Market data: ${mkt.marketEnabled() ? 'configured' : 'NOT SET'}`);
   console.log(`Trading 212: ${fin.t212Enabled() ? 'configured (read-only)' : 'NOT SET'}`);
 
-  // Bring up storage before the scheduler, so the first tick can read its
-  // dedupe keys. A failure here is logged and Sam continues in memory-only
-  // mode rather than refusing to boot.
-  const dbUp = await initDb();
-
   // Proactive cadence: morning brief, Friday debrief, chases, relationship
-  // checks, meeting prep, watchlist alerts.
+  // checks, meeting prep, watchlist alerts. Storage is already up by here, so
+  // the first tick can read its dedupe keys.
   startBeverlyProactive();
 
   logEvent('BOOT', {
