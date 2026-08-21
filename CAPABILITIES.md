@@ -58,9 +58,19 @@ pointed at a licensed adviser.
 | `DATABASE_URL` | Postgres. Railway provides this when you add a Postgres service. |
 | `PGSSL` | `off` for `*.railway.internal` URLs (detected automatically) |
 
-**To provision:** in Railway, open project `cheerful-connection` → **New** →
-**Database** → **PostgreSQL**. Railway injects `DATABASE_URL` into the service.
-Redeploy; Sam creates its own schema on boot and logs `[DB] schema ready`.
+**To provision:**
+
+1. Railway → project `cheerful-connection` → **New** → **Database** → **PostgreSQL**.
+2. Railway puts `DATABASE_URL` on the *Postgres service*, not on Sam. Open the
+   **sam-telegram-bot** service → **Variables** → add:
+   `DATABASE_URL` = `${{Postgres.DATABASE_URL}}`
+   (substitute the actual Postgres service name if Railway named it differently).
+   That reference resolves to the internal `*.railway.internal` host, which
+   costs no egress and needs no TLS — `sslConfig()` detects it automatically.
+3. Redeploy. Sam creates its own schema on boot and logs `[DB] schema ready`.
+
+Step 2 is easy to miss: adding the database alone does nothing until Sam is
+given the reference.
 
 Until this exists Sam forgets Beverly on every redeploy, and open items,
 portfolio and journal tools all report storage unavailable.

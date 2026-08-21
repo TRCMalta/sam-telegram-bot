@@ -8,9 +8,14 @@ replies on WhatsApp).
 ## Required addition: Postgres
 
 Sam now needs a Postgres service in `cheerful-connection` for durable memory,
-open items, and Beverly's portfolio and trade journal. Add it via **New →
-Database → PostgreSQL**; Railway injects `DATABASE_URL` and Sam creates its own
-schema on boot.
+open items, and Beverly's portfolio and trade journal.
+
+1. **New → Database → PostgreSQL** in this project.
+2. On the **sam-telegram-bot** service, add a variable
+   `DATABASE_URL` = `${{Postgres.DATABASE_URL}}`. Railway does NOT wire this
+   across services automatically — the database alone does nothing until Sam
+   holds the reference.
+3. Redeploy. Sam creates its schema on boot and logs `[DB] schema ready`.
 
 Without it Sam still runs, but forgets everything on each redeploy and the
 memory, portfolio and journal tools report storage unavailable. See
