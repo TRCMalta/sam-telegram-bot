@@ -11,8 +11,15 @@ import express from "express";
 import { Anthropic } from "@anthropic-ai/sdk";
 import https from "https";
 import http from "http";
-import { readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync } from "fs";
 import { synthesizeWhatsappVoice } from "./lib/voice.js";
+import { initDb, dbAvailable, dbStatus } from "./lib/db.js";
+import { classifyDomains, heuristicDomains, condenseToolResult, routerEnabled, routerStats } from "./lib/llm.js";
+import { loadContext, saveTurn, maybeCompress, resetLiveWindow, memoryStats } from "./lib/memory.js";
+import * as items from "./lib/openitems.js";
+import * as fin from "./lib/finance.js";
+import * as mkt from "./lib/market.js";
+import { projectInvestment, formatProjection, RETURN_PRESETS } from "./lib/projections.js";
+import { startProactive } from "./lib/proactive.js";
 
 const app = express();
 app.use(express.json());
@@ -138,9 +145,17 @@ function getMaltaGreetingHint() {
   return "evening";
 }
 
-function buildSystemPrompt() {
-  return `Today's date is ${getMaltaDate()}. The current time in Malta is ${getMaltaTime()} (${getMaltaGreetingHint()}). Use this to greet Beverly appropriately — "Good morning", "Good afternoon", or "Good evening". NEVER greet with the wrong time of day.
+// ─── System prompt, assembled per message ────────────────────────────────────
+// Split into blocks so a message only pays for the context it needs. The whole
+// prompt is ~4.1K tokens and used to be sent on every Claude call, including
+// every iteration of the tool-use loop. The Malta training-funding rules alone
+// are ~1.5K tokens and are irrelevant to any question that is not about Think
+// Talent courses.
+//
+// buildSystemPrompt(null) returns everything, which is the safe default for
+// any caller that has not classified the message.
 
+const PROMPT_CORE = `
 You are Sam, the personal AI chief of staff for Beverly Cutajar, COO of The Remarkable Collective (TRC).
 
 You are not a tool Beverly queries. You are an assistant Beverly trusts.
@@ -196,8 +211,9 @@ Bespoke consulting arm for advisory projects.
 - Jonathan Dalli — Chairman/CEO
 - Beverly Cutajar — COO (your principal)
 
----
+---`;
 
+const PROMPT_FUNDING = `
 ## Government Funding Schemes (CRITICAL — know BOTH schemes well):
 
 Malta has TWO active funding schemes for individual learners. Both are available and a learner may benefit from BOTH depending on the course. Always guide the person to the right scheme based on their situation.
@@ -302,8 +318,9 @@ For corporate clients:
 There is a separate scheme called “Investing in Skills” for employers who want to upskill their workforce. This offers up to 70% subsidies on training costs.
 
 ---
+`;
 
-## YOUR DATA ACCESS — USE YOUR TOOLS
+const PROMPT_DATA_ACCESS = `## YOUR DATA ACCESS — USE YOUR TOOLS
 You have LIVE, REAL-TIME access to both business systems through tools. You are NOT limited to summaries. You CAN and MUST query:
 
 **Odoo CRM (Think Talent + Think & Consult):**
@@ -343,8 +360,9 @@ You have LIVE, REAL-TIME access to both business systems through tools. You are 
 7. You have NO artificial limits. Query as much data as you need.
 
 ---
+`;
 
-## CRM ROUTING — TWO SEPARATE SYSTEMS, TWO SEPARATE BUSINESSES
+const PROMPT_CRM_ROUTING = `## CRM ROUTING — TWO SEPARATE SYSTEMS, TWO SEPARATE BUSINESSES
 You have access to TWO completely different CRM systems. They belong to different companies. NEVER confuse them.
 
 **ODOO CRM = Think Talent + Think & Consult (training & consultancy business)**
@@ -366,8 +384,9 @@ You have access to TWO completely different CRM systems. They belong to differen
 - A company name could exist in BOTH systems (e.g. a client that uses both Think Talent training and Ceek Talent recruitment).
 
 ---
+`;
 
-**Web Search & Research (Personal Assistant Mode):**
+const PROMPT_WEB = `**Web Search & Research (Personal Assistant Mode):**
 - You are Beverly's FULL personal assistant \u2014 search for flights, hotels, restaurants, travel options, shopping, events, weather, news, company info, market data, or ANYTHING she asks about
 - When Beverly asks for flights, hotels, or travel: search Skyscanner, Booking.com, Google Flights, etc. and return specific options with prices, airlines, times, and links
 - When Beverly asks for restaurants or venues: search and return top-rated options with ratings, price range, and location
@@ -375,8 +394,44 @@ You have access to TWO completely different CRM systems. They belong to differen
 - Look up companies and gather competitive intelligence
 - NEVER redirect Beverly to "check a website" or "call a number" \u2014 YOU search, YOU find the options, YOU present them
 - Use these tools proactively and aggressively for ANYTHING outside Odoo or Firefish
+`;
 
-## INTENT CLASSIFICATION
+const PROMPT_FINANCE = `---
+
+## BEVERLY'S PERSONAL FINANCES — SEPARATE FROM TRC
+Beverly invests personally and trades as a hobby. This is her own money and has nothing to do with TRC's books. Treat it with the same discretion as everything else, and never mix it into a business report.
+
+**What you are here.** A record-keeper, an analyst and an honest second pair of eyes. You track what she holds, what she has traded, and what she said she was trying to achieve. You spot patterns she cannot see from the inside.
+
+**What you are NOT.** You are not a financial adviser and you cannot place trades. You have no order-placement capability of any kind — do not offer it, and if she asks you to buy or sell something, tell her plainly that she has to do that in her broker herself.
+
+**The hard rules:**
+1. NEVER do investment arithmetic in your head. Compounding, projections, portfolio totals, profit and loss — always use the tool. Your mental maths on a 30-year projection will be wrong, and she may act on it.
+2. Never give a buy, sell or hold recommendation. Give her the analysis and let her decide. "Here is what the numbers show" — never "you should".
+3. Never state a projection as a prediction. Always give the range and say plainly that these are historical averages, not forecasts.
+4. Anything touching her tax position, her risk capacity, or a large irreversible decision — say it needs a licensed adviser. Do not improvise around it.
+5. Never invent a price, a holding or a figure. If the market data is unavailable, say so.
+
+**Two different modes, do not confuse them:**
+- **Trading hobby** — active positions, watchlist, the trade journal. Here your job is discipline: she writes the thesis before the outcome is known, and you hold her to it afterwards. When the discipline tool flags a pattern, raise it once, plainly, with her own numbers. Do not lecture and do not repeat it every week.
+- **Long-term investing** — stocks, shares, bonds, funds. Here your job is the opposite: help her do nothing. Allocation, performance against a benchmark, dividends, bond coupons and maturities. Discourage reacting to noise.
+
+When she asks a projection question ("what if I put in X plus Y a month for Z years"), use project_investment and give her the breakdown per period. Show what she puts in versus what growth adds, and always the inflation-adjusted figure — the nominal number alone flatters the outcome badly over long horizons.`;
+
+const PROMPT_MEMORY = `---
+
+## OPEN ITEMS, DECISIONS AND RELATIONSHIPS
+You remember across conversations. Use it.
+
+- When Beverly commits to something, or someone commits to her, log it with log_open_item. Capture who it involves and when it is due if she said.
+- When she makes a real decision, log it as a decision with the reasoning. Months later the reasoning is the valuable part, not the outcome.
+- When she asks what is outstanding, what she owes someone, or what she decided about something — check with list_open_items before answering. Never guess from conversation alone.
+- Close items when she tells you they are done. Do not leave a stale list.
+- Log contact with people using log_contact so you can spot the relationships that have gone quiet.
+
+Do not narrate this bookkeeping at her. Log it and move on — a brief "logged" is enough.`;
+
+const PROMPT_TAIL = `## INTENT CLASSIFICATION
 Classify Beverly's messages:
 - **pipeline_query** — asking about recruitment pipeline, candidates, placements, or Ceek activity -> use Firefish tools
 - **training_query** — asking about Think Talent pipeline, courses, proposals, deals -> use Odoo tools
@@ -395,6 +450,25 @@ Classify Beverly's messages:
 4. Always lead with the answer
 5. Never make Beverly feel like she is talking to software
 6. When asked about a company, ALWAYS search for it — never assume it does not exist`;
+
+function buildSystemPrompt(domains = null) {
+  const all = domains === null || !Array.isArray(domains);
+  const has = (d) => all || domains.includes(d);
+
+  const parts = [
+    `Today's date is ${getMaltaDate()}. The current time in Malta is ${getMaltaTime()} (${getMaltaGreetingHint()}). Use this to greet Beverly appropriately — "Good morning", "Good afternoon", or "Good evening". NEVER greet with the wrong time of day.`,
+    PROMPT_CORE,
+  ];
+
+  if (has("odoo")) parts.push(PROMPT_FUNDING);
+  if (has("odoo") || has("firefish") || has("m365")) parts.push(PROMPT_DATA_ACCESS);
+  if (has("odoo") || has("firefish")) parts.push(PROMPT_CRM_ROUTING);
+  if (has("web")) parts.push(PROMPT_WEB);
+  if (has("finance")) parts.push(PROMPT_FINANCE);
+  if (has("memory")) parts.push(PROMPT_MEMORY);
+
+  parts.push(PROMPT_TAIL);
+  return parts.join("\n");
 }
 
 // ─── Sam's Tools (Claude Tool Use) ──────────────────────────────────────────
@@ -710,7 +784,298 @@ const SAM_TOOLS = [
       required: ["subject", "start", "end"]
     }
   },
+  // ─── Beverly's personal finances ──────────────────────────────────────────
+  // Sam records, values and analyses. There is deliberately no order-placement
+  // tool here and there must never be one.
+  {
+    name: "project_investment",
+    description: "[FINANCE] Work out what an investment could grow to. Use this for ANY compounding, projection or 'what if I invest X' question — never calculate it yourself, your arithmetic will be wrong and Beverly may act on it. Handles a lump sum, a monthly contribution, or both, across several time horizons in one call. Returns a range of scenarios plus the inflation-adjusted value.",
+    input_schema: {
+      type: "object",
+      properties: {
+        initial: { type: "number", description: "Lump sum invested today. 0 if she is only contributing monthly." },
+        monthly: { type: "number", description: "Amount added every month. 0 for a lump sum only." },
+        years: { type: "array", items: { type: "number" }, description: "Time horizons to show, e.g. [15,20,30,40]. Default [15,20,30,40]." },
+        instrument: { type: "string", description: "What she is investing in: 's&p 500', 'world', 'msci world', 'bonds', or 'balanced'. Sets the assumed return range. Default 's&p 500'." },
+        annual_return_pct: { type: "number", description: "Override the base annual return, if Beverly specifies one. Conservative and optimistic cases are set 2 points either side." },
+        ter_pct: { type: "number", description: "Fund ongoing charge as a percent, e.g. 0.07. Default 0.07." },
+        inflation_pct: { type: "number", description: "Inflation for the real-terms figure. Default 2." },
+        currency: { type: "string", description: "EUR (default), USD or GBP." }
+      }
+    }
+  },
+  {
+    name: "get_market_quote",
+    description: "[FINANCE] Current price for one or more stocks, ETFs or indices. Use whenever Beverly asks what something is trading at, or before discussing a position.",
+    input_schema: {
+      type: "object",
+      properties: {
+        symbols: { type: "array", items: { type: "string" }, description: "Ticker symbols, e.g. ['AAPL','NVDA']" }
+      },
+      required: ["symbols"]
+    }
+  },
+  {
+    name: "research_instrument",
+    description: "[FINANCE] Company profile and recent news for a ticker. Use when Beverly asks about a specific company she holds or is considering, or wants to know why something moved.",
+    input_schema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string", description: "Ticker symbol" },
+        news_days: { type: "number", description: "Days of news to include. Default 7." }
+      },
+      required: ["symbol"]
+    }
+  },
+  {
+    name: "get_portfolio",
+    description: "[FINANCE] Beverly's current holdings valued at market prices, with allocation, unrealised profit and loss, and concentration warnings. Use for 'how is my portfolio doing', 'what do I hold', 'am I too concentrated'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Limit to one account, e.g. 't212'. Omit for everything." }
+      }
+    }
+  },
+  {
+    name: "record_holding",
+    description: "[FINANCE] Add or update a position Beverly holds. Use when she tells you what she owns. For bonds also capture the coupon and maturity.",
+    input_schema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string", description: "Ticker, or an identifier for a bond" },
+        quantity: { type: "number", description: "Units held" },
+        avg_cost: { type: "number", description: "Average price paid per unit" },
+        name: { type: "string", description: "Full instrument name" },
+        asset_class: { type: "string", enum: ["equity","etf","bond","fund","cash","other"], description: "Default equity" },
+        currency: { type: "string", description: "Currency of the instrument. Default EUR." },
+        coupon_rate: { type: "number", description: "Bonds only — annual coupon as a percent" },
+        maturity: { type: "string", description: "Bonds only — maturity date YYYY-MM-DD" },
+        account: { type: "string", description: "Which account it sits in. Default 'default'." }
+      },
+      required: ["symbol", "quantity"]
+    }
+  },
+  {
+    name: "remove_holding",
+    description: "[FINANCE] Remove a position Beverly no longer holds.",
+    input_schema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string" },
+        account: { type: "string", description: "Default 'default'." }
+      },
+      required: ["symbol"]
+    }
+  },
+  {
+    name: "log_trade",
+    description: "[FINANCE] Record a trade Beverly has already made. Use when she mentions buying or selling something, e.g. 'bought 50 NVDA at 118'. This does NOT place a trade — it only records one she made herself.",
+    input_schema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string" },
+        side: { type: "string", enum: ["buy","sell"] },
+        quantity: { type: "number" },
+        price: { type: "number", description: "Price per unit" },
+        fees: { type: "number", description: "Commission or fees. Default 0." },
+        currency: { type: "string", description: "Default EUR." },
+        traded_at: { type: "string", description: "ISO date/time. Defaults to now." },
+        account: { type: "string" }
+      },
+      required: ["symbol", "side", "quantity", "price"]
+    }
+  },
+  {
+    name: "list_trades",
+    description: "[FINANCE] Beverly's recorded trade history, optionally filtered by symbol or date.",
+    input_schema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string" },
+        since: { type: "string", description: "ISO date — only trades on or after this" },
+        limit: { type: "number", description: "Default 30" }
+      }
+    }
+  },
+  {
+    name: "trading_performance",
+    description: "[FINANCE] Realised profit and loss on closed positions (FIFO), plus behavioural analysis of Beverly's trading: win rate, average win against average loss, whether she holds losers longer than winners, activity spikes, re-entry after a loss, and journal coverage. Use for 'how am I doing', 'am I actually making money trading', or any review of her trading hobby.",
+    input_schema: {
+      type: "object",
+      properties: {
+        days: { type: "number", description: "Look-back window in days. Default 90." }
+      }
+    }
+  },
+  {
+    name: "journal_trade",
+    description: "[FINANCE] Record why Beverly is taking a position — the thesis, how she feels about it, and where she plans to exit or stop out. Write this BEFORE the outcome is known; that is the entire point. Encourage her to set a stop level.",
+    input_schema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string" },
+        thesis: { type: "string", description: "Why she is taking the position, in her words" },
+        emotion: { type: "string", description: "How she describes feeling about it — conviction, FOMO, hedging a worry" },
+        plan_exit: { type: "number", description: "Price she plans to take profit at" },
+        plan_stop: { type: "number", description: "Price at which she will cut the loss" }
+      },
+      required: ["symbol"]
+    }
+  },
+  {
+    name: "review_journal",
+    description: "[FINANCE] Read back Beverly's trade journal, or close an entry with what actually happened and what she learned. Use when reviewing how a position played out against the thesis she wrote at the time.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list","close"], description: "Default list" },
+        symbol: { type: "string", description: "Filter, or the symbol being closed out" },
+        entry_id: { type: "number", description: "Journal entry id, required when closing" },
+        outcome: { type: "string", description: "What actually happened" },
+        lesson: { type: "string", description: "What she would do differently" },
+        limit: { type: "number", description: "Default 10" }
+      }
+    }
+  },
+  {
+    name: "manage_watchlist",
+    description: "[FINANCE] Beverly's watchlist and price alerts. She gets a message when a level is crossed. Use for 'watch X', 'tell me if X drops below Y', 'what am I watching'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["add","remove","list"], description: "Default list" },
+        symbol: { type: "string" },
+        note: { type: "string", description: "Why she is watching it" },
+        alert_above: { type: "number", description: "Alert when price rises to or above this" },
+        alert_below: { type: "number", description: "Alert when price falls to or below this" }
+      }
+    }
+  },
+  {
+    name: "import_broker_data",
+    description: "[FINANCE] Pull Beverly's positions from Trading 212, or parse a broker statement or CSV she has pasted in. Read-only — this never sends anything to her broker.",
+    input_schema: {
+      type: "object",
+      properties: {
+        source: { type: "string", enum: ["t212","statement"], description: "'t212' syncs positions; 'statement' parses pasted text" },
+        text: { type: "string", description: "The statement or CSV content, required when source is 'statement'" }
+      },
+      required: ["source"]
+    }
+  },
+
+  // ─── Memory: commitments, decisions, relationships ────────────────────────
+  {
+    name: "log_open_item",
+    description: "[MEMORY] Record a commitment, a decision, or a follow-up. Use whenever Beverly promises something, someone promises her something, or she makes a real decision. Log decisions with the reasoning — months later the reasoning is what matters.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Short description of the commitment or decision" },
+        kind: { type: "string", enum: ["commitment","decision","followup"], description: "Default commitment" },
+        detail: { type: "string", description: "Context, or the reasoning behind a decision" },
+        counterparty: { type: "string", description: "Person or company it involves" },
+        due_date: { type: "string", description: "YYYY-MM-DD, if there is a deadline" },
+        owner: { type: "string", description: "'beverly' if she owes it, otherwise who does. Default beverly." }
+      },
+      required: ["title"]
+    }
+  },
+  {
+    name: "list_open_items",
+    description: "[MEMORY] What is outstanding. Use before answering anything about what Beverly owes, what is due, what she decided, or what is still open — never answer those from conversation memory alone.",
+    input_schema: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["open","done","dropped"], description: "Default open" },
+        kind: { type: "string", enum: ["commitment","decision","followup"] },
+        counterparty: { type: "string", description: "Filter by person or company" },
+        overdue_only: { type: "boolean", description: "Only items past their due date" },
+        limit: { type: "number", description: "Default 25" }
+      }
+    }
+  },
+  {
+    name: "update_open_item",
+    description: "[MEMORY] Change or close an open item. Use when Beverly says something is done, no longer needed, or the deadline has moved.",
+    input_schema: {
+      type: "object",
+      properties: {
+        id: { type: "number", description: "Item id from list_open_items" },
+        status: { type: "string", enum: ["open","done","dropped"] },
+        title: { type: "string" },
+        detail: { type: "string" },
+        due_date: { type: "string", description: "YYYY-MM-DD" },
+        counterparty: { type: "string" }
+      },
+      required: ["id"]
+    }
+  },
+  {
+    name: "log_contact",
+    description: "[MEMORY] Record that Beverly has been in touch with someone, and optionally how often she wants to stay in touch. Setting a cadence lets you flag the relationship when it goes quiet.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Person's name" },
+        org: { type: "string", description: "Their company" },
+        role: { type: "string", description: "Their role" },
+        cadence_days: { type: "number", description: "How many days between contacts before it counts as gone quiet" },
+        notes: { type: "string" },
+        at: { type: "string", description: "ISO date of contact. Defaults to now." }
+      },
+      required: ["name"]
+    }
+  },
+  {
+    name: "list_contacts",
+    description: "[MEMORY] Beverly's tracked relationships, most recently contacted first, with anyone who has gone past their cadence flagged.",
+    input_schema: {
+      type: "object",
+      properties: { limit: { type: "number", description: "Default 30" } }
+    }
+  },
 ];
+
+// ─── Tool routing by domain ──────────────────────────────────────────────────
+// Sam now has 43 tools. Their schemas total several thousand tokens and used to
+// be sent on every Claude call, re-sent on each iteration of the tool-use loop.
+// Hermes classifies the message first and we send only the relevant subset.
+// An unclassified message falls back to the full set, so a router outage costs
+// tokens rather than capability.
+const TOOL_DOMAIN = {
+  odoo: [
+    "query_crm_pipeline", "update_crm_lead", "create_crm_lead", "query_odoo_products",
+    "query_odoo_contacts", "query_odoo_events", "query_odoo_invoices", "query_odoo_sales_orders",
+    "log_odoo_note", "get_available_tags", "get_leads_by_tag", "update_lead_tags",
+    "get_pipeline_summary",
+  ],
+  firefish: [
+    "get_pipeline_summary", "search_recruitment_jobs", "search_placements",
+    "search_candidates", "search_companies_firefish",
+  ],
+  m365: [
+    "check_beverly_email", "check_beverly_calendar", "send_beverly_email",
+    "create_beverly_calendar_event",
+  ],
+  web: ["web_search", "browse_url", "company_lookup", "competitor_intel"],
+  finance: [
+    "project_investment", "get_market_quote", "research_instrument", "get_portfolio",
+    "record_holding", "remove_holding", "log_trade", "list_trades", "trading_performance",
+    "journal_trade", "review_journal", "manage_watchlist", "import_broker_data",
+  ],
+  memory: ["log_open_item", "list_open_items", "update_open_item", "log_contact", "list_contacts"],
+};
+
+function toolsForDomains(domains) {
+  if (!Array.isArray(domains)) return SAM_TOOLS;
+  if (!domains.length) return [];          // confidently nothing — smalltalk
+  const wanted = new Set();
+  for (const d of domains) for (const n of (TOOL_DOMAIN[d] || [])) wanted.add(n);
+  const subset = SAM_TOOLS.filter((t) => wanted.has(t.name));
+  return subset.length ? subset : SAM_TOOLS;
+}
 
 // ─── HTTP Helper ──────────────────────────────────────────────────────────────
 
@@ -1876,6 +2241,292 @@ const res = await msGraphGet(path);
         return t;
       }
 
+      // ─── Finance ─────────────────────────────────────────────────────────
+      case "project_investment": {
+        // Deterministic maths — never let the model do this arithmetic itself.
+        const opts = {
+          initial: Number(input.initial || 0),
+          monthly: Number(input.monthly || 0),
+          years: Array.isArray(input.years) && input.years.length ? input.years.map(Number) : [15, 20, 30, 40],
+          instrument: input.instrument || "s&p 500",
+          terPct: input.ter_pct !== undefined ? Number(input.ter_pct) : undefined,
+          inflationPct: input.inflation_pct !== undefined ? Number(input.inflation_pct) : undefined,
+          currency: (input.currency || "EUR").toUpperCase(),
+        };
+        if (input.annual_return_pct !== undefined) {
+          const base = Number(input.annual_return_pct);
+          opts.returns = {
+            conservative: Math.max(0, base - 2), base, optimistic: base + 2,
+            label: input.instrument || `${base}% a year`,
+          };
+        }
+        if (opts.initial <= 0 && opts.monthly <= 0) {
+          return "I need either a lump sum or a monthly amount to project from.";
+        }
+        return formatProjection(projectInvestment(opts));
+      }
+
+      case "get_market_quote": {
+        if (!mkt.marketEnabled()) return "Market data is not configured (FINNHUB_API_KEY missing).";
+        const syms = (input.symbols || []).slice(0, 15);
+        if (!syms.length) return "No symbols given.";
+        const quotes = await mkt.getQuotes(syms);
+        const lines = [];
+        for (const s of syms) {
+          const qt = quotes[s];
+          if (!qt) { lines.push(`${s}: no price available`); continue; }
+          const sign = qt.changePct >= 0 ? "+" : "";
+          lines.push(`${qt.symbol}: ${qt.price} (${sign}${(qt.changePct ?? 0).toFixed(2)}% today)`);
+        }
+        return lines.join("\n");
+      }
+
+      case "research_instrument": {
+        if (!mkt.marketEnabled()) return "Market data is not configured (FINNHUB_API_KEY missing).";
+        const sym = String(input.symbol).toUpperCase();
+        const [profile, quote, news] = await Promise.all([
+          mkt.getProfile(sym), mkt.getQuote(sym), mkt.getCompanyNews(sym, input.news_days || 7),
+        ]);
+        if (!profile && !quote) {
+          const alt = await mkt.searchSymbol(sym);
+          if (alt.length) return `No data for ${sym}. Did you mean: ${alt.map(a => `${a.symbol} (${a.description})`).join(", ")}?`;
+          return `No data found for ${sym}.`;
+        }
+        const out = [];
+        if (profile) out.push(`${profile.name} (${profile.symbol}) — ${profile.industry || "n/a"}, ${profile.exchange || "n/a"}`);
+        if (quote) out.push(`Price ${quote.price} ${profile?.currency || ""} (${quote.changePct >= 0 ? "+" : ""}${(quote.changePct ?? 0).toFixed(2)}% today)`);
+        if (profile?.marketCap) out.push(`Market cap ${Math.round(profile.marketCap).toLocaleString("en-GB")}m`);
+        if (news.length) {
+          out.push("\nRecent news:");
+          for (const n of news) out.push(`- ${n.headline} (${n.source})`);
+        }
+        return out.join("\n");
+      }
+
+      case "get_portfolio": {
+        if (!dbAvailable()) return "Portfolio storage is unavailable — the database is not connected.";
+        const valued = await fin.valuePortfolio(input.account || null);
+        if (!valued.holdings.length) return "No holdings recorded yet. Tell me what she holds, or import from Trading 212.";
+        const cur = valued.currency;
+        const out = [`*Portfolio* — ${cur} ${Math.round(valued.total).toLocaleString("en-GB")}`];
+        if (valued.unrealisedPct !== null) {
+          out.push(`Against cost: ${valued.unrealised >= 0 ? "+" : ""}${Math.round(valued.unrealised).toLocaleString("en-GB")} (${valued.unrealisedPct >= 0 ? "+" : ""}${valued.unrealisedPct.toFixed(1)}%)`);
+        }
+        out.push("");
+        for (const h of valued.holdings) {
+          if (h.valueBase === null) { out.push(`${h.symbol}: ${h.quantity} — price unavailable`); continue; }
+          const pl = h.unrealisedPct === null ? "" : ` ${h.unrealisedPct >= 0 ? "+" : ""}${h.unrealisedPct.toFixed(1)}%`;
+          out.push(`${h.symbol}: ${Math.round(h.valueBase).toLocaleString("en-GB")} ${cur} (${(h.weightPct ?? 0).toFixed(1)}%)${pl}`);
+        }
+        const alloc = fin.allocationByClass(valued);
+        if (alloc.length > 1) {
+          out.push("\nBy asset class: " + alloc.map(a => `${a.assetClass} ${a.pct.toFixed(0)}%`).join(", "));
+        }
+        const conc = fin.concentrationFlags(valued);
+        if (conc.length) { out.push(""); for (const c of conc) out.push(`⚠ ${c.detail}`); }
+        if (valued.problems.length) out.push(`\nCouldn't price: ${valued.problems.join("; ")}`);
+        return out.join("\n");
+      }
+
+      case "record_holding": {
+        if (!dbAvailable()) return "Portfolio storage is unavailable — the database is not connected.";
+        const h = await fin.upsertHolding({
+          symbol: input.symbol, quantity: Number(input.quantity),
+          avgCost: input.avg_cost !== undefined ? Number(input.avg_cost) : null,
+          name: input.name || null, assetClass: input.asset_class || "equity",
+          currency: (input.currency || "EUR").toUpperCase(),
+          couponRate: input.coupon_rate !== undefined ? Number(input.coupon_rate) : null,
+          maturity: input.maturity || null, account: input.account || "default",
+        });
+        return h ? `Recorded ${h.quantity} ${h.symbol}${h.avg_cost ? ` at ${h.avg_cost}` : ""}.` : "Could not record that holding.";
+      }
+
+      case "remove_holding": {
+        if (!dbAvailable()) return "Portfolio storage is unavailable — the database is not connected.";
+        const gone = await fin.removeHolding(input.symbol, input.account || "default");
+        return gone ? `Removed ${String(input.symbol).toUpperCase()}.` : `No holding found for ${String(input.symbol).toUpperCase()}.`;
+      }
+
+      case "log_trade": {
+        if (!dbAvailable()) return "Trade storage is unavailable — the database is not connected.";
+        const t = await fin.recordTrade({
+          symbol: input.symbol, side: input.side, quantity: Number(input.quantity),
+          price: Number(input.price), fees: Number(input.fees || 0),
+          currency: (input.currency || "EUR").toUpperCase(),
+          tradedAt: input.traded_at || null, account: input.account || "default",
+        });
+        if (!t) return "Could not record that trade.";
+        return `Logged: ${t.side} ${t.quantity} ${t.symbol} at ${t.price}.`;
+      }
+
+      case "list_trades": {
+        if (!dbAvailable()) return "Trade storage is unavailable — the database is not connected.";
+        const rows = await fin.listTrades({
+          symbol: input.symbol || null, since: input.since || null, limit: input.limit || 30,
+        });
+        if (!rows.length) return "No trades recorded.";
+        return rows.map(t =>
+          `${String(t.traded_at).slice(0, 10)} ${t.side} ${t.quantity} ${t.symbol} @ ${t.price}${Number(t.fees) ? ` (fees ${t.fees})` : ""}`
+        ).join("\n");
+      }
+
+      case "trading_performance": {
+        if (!dbAvailable()) return "Trade storage is unavailable — the database is not connected.";
+        const days = input.days || 90;
+        const d = await fin.tradingDiscipline({ days });
+        if (!d.enoughData) return `Only ${d.tradeCount} trade(s) recorded in the last ${days} days — not enough to draw anything from yet.`;
+        const out = [`*Trading — last ${days} days*`];
+        out.push(`${d.tradeCount} trades, ${d.roundTrips} closed round trips.`);
+        if (d.winRate !== null) out.push(`Win rate ${d.winRate.toFixed(0)}%. Average win ${d.avgWin.toFixed(0)}, average loss ${d.avgLoss.toFixed(0)}.`);
+        if (d.profitFactor !== null && Number.isFinite(d.profitFactor)) out.push(`Profit factor ${d.profitFactor.toFixed(2)}${d.profitFactor < 1 ? " — below 1 means the losses outweigh the wins." : ""}`);
+        out.push(`Net realised: ${d.netRealised >= 0 ? "+" : ""}${d.netRealised.toFixed(0)}.`);
+        if (d.avgWinHoldDays || d.avgLossHoldDays) out.push(`Held winners ${d.avgWinHoldDays.toFixed(0)}d, losers ${d.avgLossHoldDays.toFixed(0)}d.`);
+        if (d.flags.length) {
+          out.push("\nPatterns worth knowing:");
+          for (const f of d.flags) out.push(`${f.severity === "high" ? "⚠ " : ""}${f.detail}`);
+        } else {
+          out.push("\nNo problem patterns in the data.");
+        }
+        return out.join("\n");
+      }
+
+      case "journal_trade": {
+        if (!dbAvailable()) return "Journal storage is unavailable — the database is not connected.";
+        const e = await fin.addJournalEntry({
+          symbol: input.symbol, thesis: input.thesis || null, emotion: input.emotion || null,
+          planExit: input.plan_exit !== undefined ? Number(input.plan_exit) : null,
+          planStop: input.plan_stop !== undefined ? Number(input.plan_stop) : null,
+        });
+        if (!e) return "Could not save that journal entry.";
+        return `Journal entry ${e.id} saved for ${e.symbol}.${e.plan_stop === null ? " No stop level set — worth deciding one now rather than in the moment." : ""}`;
+      }
+
+      case "review_journal": {
+        if (!dbAvailable()) return "Journal storage is unavailable — the database is not connected.";
+        if ((input.action || "list") === "close") {
+          if (!input.entry_id) return "I need the journal entry id to close it.";
+          const closed = await fin.closeJournalEntry(input.entry_id, {
+            outcome: input.outcome || null, lesson: input.lesson || null,
+          });
+          return closed ? `Closed journal entry ${closed.id} for ${closed.symbol}.` : "No entry with that id.";
+        }
+        const rows = await fin.listJournal({ symbol: input.symbol || null, limit: input.limit || 10 });
+        if (!rows.length) return "Nothing in the journal yet.";
+        return rows.map(j => {
+          const bits = [`[${j.id}] ${j.symbol} — ${String(j.created_at).slice(0, 10)}`];
+          if (j.thesis) bits.push(`  Thesis: ${j.thesis}`);
+          if (j.plan_stop !== null || j.plan_exit !== null) bits.push(`  Plan: exit ${j.plan_exit ?? "—"}, stop ${j.plan_stop ?? "—"}`);
+          if (j.outcome) bits.push(`  Outcome: ${j.outcome}`);
+          if (j.lesson) bits.push(`  Lesson: ${j.lesson}`);
+          return bits.join("\n");
+        }).join("\n\n");
+      }
+
+      case "manage_watchlist": {
+        if (!dbAvailable()) return "Watchlist storage is unavailable — the database is not connected.";
+        const action = input.action || "list";
+        if (action === "add") {
+          if (!input.symbol) return "Which symbol?";
+          const w = await fin.addToWatchlist({
+            symbol: input.symbol, note: input.note || null,
+            alertAbove: input.alert_above !== undefined ? Number(input.alert_above) : null,
+            alertBelow: input.alert_below !== undefined ? Number(input.alert_below) : null,
+          });
+          if (!w) return "Could not add that.";
+          const levels = [];
+          if (w.alert_above !== null) levels.push(`above ${w.alert_above}`);
+          if (w.alert_below !== null) levels.push(`below ${w.alert_below}`);
+          return `Watching ${w.symbol}${levels.length ? `, alerting ${levels.join(" or ")}` : ""}.`;
+        }
+        if (action === "remove") {
+          const gone = await fin.removeFromWatchlist(input.symbol);
+          return gone ? `Removed ${String(input.symbol).toUpperCase()} from the watchlist.` : "That wasn't on the watchlist.";
+        }
+        const list = await fin.listWatchlist();
+        if (!list.length) return "Watchlist is empty.";
+        const quotes = mkt.marketEnabled() ? await mkt.getQuotes(list.map(w => w.symbol)) : {};
+        return list.map(w => {
+          const qt = quotes[w.symbol];
+          const levels = [];
+          if (w.alert_above !== null) levels.push(`↑${w.alert_above}`);
+          if (w.alert_below !== null) levels.push(`↓${w.alert_below}`);
+          return `${w.symbol}${qt ? ` ${qt.price}` : ""}${levels.length ? ` (${levels.join(" ")})` : ""}${w.note ? ` — ${w.note}` : ""}`;
+        }).join("\n");
+      }
+
+      case "import_broker_data": {
+        if (!dbAvailable()) return "Storage is unavailable — the database is not connected.";
+        if (input.source === "t212") {
+          if (!fin.t212Enabled()) return "Trading 212 is not connected (T212_API_KEY missing).";
+          const r = await fin.importFromT212();
+          if (!r.ok) return `Trading 212 import failed: ${r.reason}`;
+          return `Imported ${r.imported} position(s) from Trading 212${r.cash !== null ? `, cash ${r.cash}` : ""}.`;
+        }
+        if (!input.text) return "Paste the statement or CSV content and I'll parse it.";
+        const r = await fin.importStatement(input.text);
+        if (!r.ok) return `Could not parse that: ${r.reason}`;
+        let msg = `Imported ${r.inserted} trade(s).`;
+        if (r.skipped) msg += ` ${r.skipped} already on record.`;
+        if (r.rejected.length) msg += ` ${r.rejected.length} row(s) I couldn't read reliably — tell me if you want those listed.`;
+        return msg;
+      }
+
+      // ─── Memory ──────────────────────────────────────────────────────────
+      case "log_open_item": {
+        if (!dbAvailable()) return "Memory storage is unavailable — the database is not connected.";
+        const it = await items.createItem({
+          title: input.title, kind: input.kind || "commitment", detail: input.detail || null,
+          counterparty: input.counterparty || null, owner: input.owner || "beverly",
+          dueDate: input.due_date || null,
+        });
+        return it ? `Logged (${it.kind} #${it.id}).` : "Could not log that.";
+      }
+
+      case "list_open_items": {
+        if (!dbAvailable()) return "Memory storage is unavailable — the database is not connected.";
+        const rows = await items.listItems({
+          status: input.status || "open", kind: input.kind || null,
+          counterparty: input.counterparty || null, overdueOnly: Boolean(input.overdue_only),
+          limit: input.limit || 25,
+        });
+        return items.formatItems(rows, {
+          heading: input.overdue_only ? "Overdue" : `${input.kind || "Open"} items`,
+        });
+      }
+
+      case "update_open_item": {
+        if (!dbAvailable()) return "Memory storage is unavailable — the database is not connected.";
+        const up = await items.updateItem(input.id, {
+          title: input.title || null, detail: input.detail || null,
+          dueDate: input.due_date || null, counterparty: input.counterparty || null,
+          status: input.status || null,
+        });
+        if (!up) return "No item with that id.";
+        return up.status === "open" ? `Updated #${up.id}.` : `Marked #${up.id} as ${up.status}.`;
+      }
+
+      case "log_contact": {
+        if (!dbAvailable()) return "Memory storage is unavailable — the database is not connected.";
+        const r = await items.touchRelationship(input.name, {
+          org: input.org || null, role: input.role || null,
+          cadenceDays: input.cadence_days !== undefined ? Number(input.cadence_days) : null,
+          notes: input.notes || null, at: input.at || null,
+        });
+        return r ? `Logged contact with ${r.name}.` : "Could not log that.";
+      }
+
+      case "list_contacts": {
+        if (!dbAvailable()) return "Memory storage is unavailable — the database is not connected.";
+        const rows = await items.listRelationships({ limit: input.limit || 30 });
+        if (!rows.length) return "No contacts tracked yet.";
+        const now = Date.now();
+        return rows.map(r => {
+          const days = r.last_contact_at ? Math.floor((now - new Date(r.last_contact_at)) / 86400000) : null;
+          const stale = r.cadence_days && days !== null && days > r.cadence_days;
+          return `${r.name}${r.org ? ` (${r.org})` : ""}${days !== null ? ` — ${days}d ago` : ""}${stale ? " ⚠ gone quiet" : ""}`;
+        }).join("\n");
+      }
+
       default: return "Unknown tool: " + name;
     }
   } catch(err) {
@@ -1887,77 +2538,9 @@ const res = await msGraphGet(path);
 // ─── Core Message Handler ─────────────────────────────────────────────────────
 
 // --- Conversation Memory ---
-// Stores { messages: [...], lastActivity: Date.now() } per chatId
-const conversationHistory = {};
-const MAX_HISTORY_TURNS = 20; // Keep last 20 user+assistant pairs
-const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 min inactivity = fresh convo
-const MAX_CONCURRENT_CONVERSATIONS = 100; // Hard cap on total stored conversations
-
-function getConversationHistory(chatId) {
-  const convo = conversationHistory[chatId];
-  if (!convo) return [];
-  // Expire stale conversations
-  if (Date.now() - convo.lastActivity > CONVERSATION_TIMEOUT_MS) {
-    delete conversationHistory[chatId];
-    console.log(`[MEMORY] Conversation expired for ${chatId}`);
-    return [];
-  }
-  // Trim history if total content exceeds ~50K chars (~12K tokens) to avoid context overflow
-  let totalChars = 0;
-  for (const msg of convo.messages) {
-    totalChars += typeof msg.content === 'string' ? msg.content.length : JSON.stringify(msg.content).length;
-  }
-  if (totalChars > 50000) {
-    // Keep trimming oldest pairs until under limit
-    while (totalChars > 50000 && convo.messages.length > 2) {
-      const removed = convo.messages.shift();
-      totalChars -= typeof removed.content === 'string' ? removed.content.length : JSON.stringify(removed.content).length;
-      if (convo.messages.length > 0 && convo.messages[0].role === 'assistant') {
-        const removed2 = convo.messages.shift();
-        totalChars -= typeof removed2.content === 'string' ? removed2.content.length : JSON.stringify(removed2.content).length;
-      }
-    }
-    console.log(`[MEMORY] Trimmed history for ${chatId} to ${totalChars} chars (${convo.messages.length} entries)`);
-  }
-  return convo.messages;
-}
-
-function addToConversationHistory(chatId, role, content) {
-  if (!conversationHistory[chatId]) {
-    // Evict oldest conversation if at capacity
-    const keys = Object.keys(conversationHistory);
-    if (keys.length >= MAX_CONCURRENT_CONVERSATIONS) {
-      let oldestKey = keys[0], oldestTime = conversationHistory[keys[0]].lastActivity;
-      for (const k of keys) {
-        if (conversationHistory[k].lastActivity < oldestTime) {
-          oldestKey = k;
-          oldestTime = conversationHistory[k].lastActivity;
-        }
-      }
-      delete conversationHistory[oldestKey];
-      console.log(`[MEMORY] Evicted oldest conversation: ${oldestKey}`);
-    }
-    conversationHistory[chatId] = { messages: [], lastActivity: Date.now() };
-  }
-  conversationHistory[chatId].lastActivity = Date.now();
-  conversationHistory[chatId].messages.push({ role, content });
-  // Trim to max turns (each turn = 1 user + 1 assistant = 2 entries)
-  const maxEntries = MAX_HISTORY_TURNS * 2;
-  if (conversationHistory[chatId].messages.length > maxEntries) {
-    conversationHistory[chatId].messages = conversationHistory[chatId].messages.slice(-maxEntries);
-  }
-}
-
-// Clean up expired conversations every 10 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const chatId of Object.keys(conversationHistory)) {
-    if (now - conversationHistory[chatId].lastActivity > CONVERSATION_TIMEOUT_MS) {
-      delete conversationHistory[chatId];
-      console.log(`[MEMORY] Cleaned up expired convo: ${chatId}`);
-    }
-  }
-}, 10 * 60 * 1000);
+// Superseded by lib/memory.js, which persists to Postgres and survives a
+// redeploy. The old in-process object lived here; it is gone rather than left
+// dormant so there is one place memory can come from.
 
 // ─── Reverse watchdog — Sam monitors milo-api ────────────────────────────────
 // milo-api runs the primary every-5-min Sam health monitor. If milo-api
@@ -2030,118 +2613,87 @@ setInterval(async () => {
   }
 }, 5 * 60 * 1000);
 
-// ─── Beverly's proactive morning briefing — 07:00 Europe/Malta daily ─────────
-// Sam initiates a short fresh greeting + "what can I help with today" prompt
-// to Beverly every morning. Voice handled by Claude using Sam's full system
-// prompt — never canned text. Last-sent date persisted to /tmp so an
-// in-window restart doesn't double-fire (Sam has no Railway volume; worst
-// case after a long restart is Beverly receives two briefings, acceptable).
+// ─── Beverly's proactive cadence ─────────────────────────────────────────────
+// Was a single 07:00 greeting whose only dedupe state was a file in /tmp that
+// Railway wipes on redeploy, so a deploy could double-send or skip it. Now the
+// full chief-of-staff cadence, scheduled in lib/proactive.js with dedupe keys
+// in Postgres: morning briefing, Friday debrief, overdue chases,
+// stale-relationship checks, meeting prep and watchlist alerts.
 //
-// Time check runs every minute. setInterval is good enough — daily fire
-// doesn't need sub-second precision, and the >=07:00 / <07:05 window
-// tolerates the ~60s tick drift plus a slow Claude response.
-const MORNING_STATE_FILE = '/tmp/sam-last-morning.json';
-const MORNING_HOUR_MALTA = 7;
+// Each briefing's data is assembled deterministically in code; Claude is called
+// once per briefing purely to write it in Sam's voice.
 
-function readLastMorningDate() {
+// Beverly's calendar, shaped for the proactive layer. Returns [] rather than
+// throwing so a Graph outage degrades the briefing instead of killing the tick.
+async function getBeverlyCalendarEvents(daysAhead = 1) {
+  if (!BEVERLY_EMAIL || !MS_CLIENT_ID) return [];
   try {
-    const raw = fsReadFileSync(MORNING_STATE_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    return typeof parsed.lastSentDate === 'string' ? parsed.lastSentDate : null;
-  } catch {
+    const start = new Date();
+    const end = new Date(Date.now() + daysAhead * 86_400_000);
+    const path = `/users/${BEVERLY_EMAIL}/calendarView`
+      + `?startDateTime=${start.toISOString()}&endDateTime=${end.toISOString()}`
+      + `&$orderby=start/dateTime&$top=20`;
+    const data = await msGraphGet(path);
+    if (!data || !Array.isArray(data.value)) return [];
+    return data.value.map((e) => {
+      // Graph returns a naive timestamp plus a separate zone field.
+      const raw = e.start?.dateTime;
+      const startsAt = raw ? new Date(raw.endsWith('Z') ? raw : `${raw}Z`) : null;
+      return {
+        id: e.id,
+        subject: e.subject || '(no subject)',
+        startsAt: startsAt ? startsAt.toISOString() : null,
+        time: startsAt
+          ? startsAt.toLocaleTimeString('en-GB', { timeZone: 'Europe/Malta', hour: '2-digit', minute: '2-digit' })
+          : '',
+        location: e.location?.displayName || '',
+        attendees: (e.attendees || []).map((a) => a.emailAddress?.name).filter(Boolean).slice(0, 4).join(', '),
+      };
+    });
+  } catch (err) {
+    console.error(`[CALENDAR] ${err.message}`);
+    return [];
+  }
+}
+
+// One Claude call, in Sam's voice, over a digest built in code.
+async function askSamToWrite(instruction, digest) {
+  try {
+    const response = await anthropic.messages.create({
+      model: CLAUDE_MODEL,
+      max_tokens: 500,
+      // Proactive messages need the finance, memory and calendar context but
+      // never the Malta funding-scheme rules — scope it like any other call.
+      system: buildSystemPrompt(['memory', 'finance', 'm365']),
+      messages: [{
+        role: 'user',
+        content: digest && digest.trim()
+          ? `${instruction}\n\nHere is the data. Use only what is actually in it — never invent a figure or a meeting.\n\n${digest}`
+          : instruction,
+      }],
+    });
+    let text = '';
+    for (const block of response.content) if (block.type === 'text') text += block.text;
+    return text.trim() || null;
+  } catch (err) {
+    console.error(`[PROACTIVE] Claude write failed: ${err.message}`);
     return null;
   }
 }
 
-function writeLastMorningDate(dateStr) {
-  try {
-    fsWriteFileSync(MORNING_STATE_FILE, JSON.stringify({ lastSentDate: dateStr }), 'utf8');
-  } catch (err) {
-    console.error(`[MORNING] Failed to persist state: ${err.message}`);
-  }
-}
-
-let lastMorningSent = readLastMorningDate();
-logEvent('MORNING_INIT', { lastSentDate: lastMorningSent || 'never' });
-
-// Returns { dateIso: 'YYYY-MM-DD', hour: number, minute: number } in Malta tz.
-function getMaltaClockParts() {
-  const fmt = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Europe/Malta',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
-  const parts = Object.fromEntries(fmt.formatToParts(new Date()).map(p => [p.type, p.value]));
-  return {
-    dateIso: `${parts.year}-${parts.month}-${parts.day}`,
-    hour: parseInt(parts.hour, 10),
-    minute: parseInt(parts.minute, 10),
-  };
-}
-
-async function sendBeverlyMorningBriefing() {
+function startBeverlyProactive() {
   if (!BEVERLY_WA_NUMBER) {
-    logEvent('MORNING_SKIP', { reason: 'BEVERLY_WA_NUMBER not set' });
-    return;
+    logEvent('PROACTIVE_SKIP', { reason: 'BEVERLY_WA_NUMBER not set' });
+    return null;
   }
-  const t = Date.now();
-  try {
-    const response = await anthropic.messages.create({
-      model: CLAUDE_MODEL,
-      max_tokens: 250,
-      system: buildSystemPrompt(),
-      messages: [
-        {
-          role: 'user',
-          content:
-            "[PROACTIVE MORNING TRIGGER — Beverly hasn't messaged you, you're initiating.] "
-            + "Send Beverly a short morning greeting and offer to help with something specific today. "
-            + "Lead with \"Good morning, Beverly.\" Then in one sharp sentence offer a specific way you can help — "
-            + "pick one from: pulling her schedule for today, reviewing flagged emails, summarising the recruitment pipeline, "
-            + "checking activity from a key client, drafting outreach. End with one open question inviting her to redirect you "
-            + "to whatever matters most. Max 4 sentences total. No filler, no AI-isms, no exclamation marks beyond the greeting.",
-        },
-      ],
-    });
-    let text = '';
-    for (const block of response.content) {
-      if (block.type === 'text') text += block.text;
-    }
-    if (!text) {
-      logEvent('MORNING_FAIL', { reason: 'empty Claude response', wallMs: Date.now() - t });
-      return;
-    }
-    await sendWhatsApp(BEVERLY_WA_NUMBER, text);
-    // Morning brief always goes out in BOTH text and voice (Jonathan's rule).
-    await sendVoiceReply(BEVERLY_WA_NUMBER, text);
-    logEvent('MORNING_SENT', { len: text.length, wallMs: Date.now() - t });
-  } catch (err) {
-    logEvent('MORNING_FAIL', {
-      error: String(err.message || err).slice(0, 200),
-      wallMs: Date.now() - t,
-    });
-  }
+  return startProactive({
+    send: (text) => sendWhatsApp(BEVERLY_WA_NUMBER, text),
+    // Jonathan's rule: the morning brief goes out in text and voice.
+    sendVoice: (text) => sendVoiceReply(BEVERLY_WA_NUMBER, text),
+    ask: askSamToWrite,
+    getCalendar: getBeverlyCalendarEvents,
+  });
 }
-
-setInterval(async () => {
-  try {
-    const { dateIso, hour, minute } = getMaltaClockParts();
-    if (hour !== MORNING_HOUR_MALTA || minute > 4) return;
-    if (lastMorningSent === dateIso) return;
-    // Mark sent BEFORE the await so a concurrent tick (impossible at 1-min
-    // resolution but defensive) doesn't double-fire.
-    lastMorningSent = dateIso;
-    writeLastMorningDate(dateIso);
-    logEvent('MORNING_FIRE', { maltaDate: dateIso, maltaHour: hour, maltaMinute: minute });
-    await sendBeverlyMorningBriefing();
-  } catch (err) {
-    console.error(`[MORNING] tick error: ${err.message}`);
-  }
-}, 60 * 1000);
 
 async function handleMessage(chatId, userMessage, userName, channel = 'telegram') {
   const msgStartedAt = Date.now();
@@ -2162,17 +2714,52 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
   try {
     // Build messages array - NO pre-fetching of pipeline data
     // Sam will use tools to query data on-demand
-    // Load conversation history for this chat
-    const previousMessages = getConversationHistory(chatId);
+    // Load persistent conversation context. The summary rides in the system
+    // prompt rather than as a turn, so message alternation stays valid.
+    const { messages: previousMessages, summary } = await loadContext(chatId);
     const messages = [...previousMessages, { role: 'user', content: userMessage }];
-    console.log(`[MEMORY] ${chatId}: ${previousMessages.length} history entries + new message`);
+    console.log(`[MEMORY] ${chatId}: ${previousMessages.length} history entries${summary ? ' + summary' : ''} + new message`);
+
+    // Ask Hermes which data domains this message actually needs, then send
+    // Claude only the matching tools and prompt sections. null means the
+    // router is off or unsure — fall back to the full set.
+    // Hermes first; a free keyword pass covers a router outage so the fallback
+    // path stays cheap rather than sending all 43 tool schemas.
+    let domains = await classifyDomains(userMessage);
+    let routedBy = 'hermes';
+    if (domains === null) {
+      domains = heuristicDomains(userMessage);
+      routedBy = 'keywords';
+      if (domains === null) {
+        // A short follow-up ("yes, send it", "do that") carries no keywords of
+        // its own but continues whatever came before, so widen the window to
+        // the last exchange rather than falling back to all 43 tool schemas.
+        const recent = previousMessages.slice(-2)
+          .map((m) => (typeof m.content === 'string' ? m.content : ''))
+          .join(' ');
+        domains = recent ? heuristicDomains(recent) : null;
+        routedBy = domains === null ? 'fallback-all' : 'keywords-context';
+      }
+    }
+    const activeTools = toolsForDomains(domains);
+    let systemPrompt = buildSystemPrompt(domains);
+    if (summary) {
+      systemPrompt += `\n\n---\n\n## WHAT YOU ALREADY KNOW ABOUT BEVERLY\nCarried forward from earlier conversations. Treat as established fact, do not re-ask.\n\n${summary}`;
+    }
+    logEvent('ROUTE', {
+      chat: chatId,
+      by: routedBy,
+      domains: domains === null ? 'unclassified' : (domains.join(',') || 'none'),
+      tools: activeTools.length,
+      promptChars: systemPrompt.length,
+    });
 
     // First Claude call WITH tools
     let response = await anthropic.messages.create({
       model: CLAUDE_MODEL,
       max_tokens: 4096,
-      system: buildSystemPrompt(),
-      tools: SAM_TOOLS,
+      system: systemPrompt,
+      ...(activeTools.length ? { tools: activeTools } : {}),
       messages
     });
 
@@ -2215,10 +2802,20 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
             wallMs: Date.now() - toolStartedAt,
             ok: toolOk,
           });
+          // A large result is re-sent on every subsequent iteration of this
+          // loop, so condensing it once via Hermes pays for itself repeatedly.
+          let payload = typeof result === 'string' ? result : JSON.stringify(result);
+          if (toolOk && payload.length > 4000) {
+            const condensed = await condenseToolResult(block.name, payload, userMessage);
+            if (condensed) {
+              logEvent('CONDENSE', { tool: block.name, from: payload.length, to: condensed.length });
+              payload = condensed;
+            }
+          }
           toolResults.push({
             type: 'tool_result',
             tool_use_id: block.id,
-            content: typeof result === 'string' ? result : JSON.stringify(result)
+            content: payload
           });
         }
       }
@@ -2234,8 +2831,8 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       response = await anthropic.messages.create({
         model: CLAUDE_MODEL,
         max_tokens: 4096,
-        system: buildSystemPrompt(),
-        tools: SAM_TOOLS,
+        system: systemPrompt,
+        ...(activeTools.length ? { tools: activeTools } : {}),
         messages
       });
     }
@@ -2248,7 +2845,7 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       response = await anthropic.messages.create({
         model: CLAUDE_MODEL,
         max_tokens: 4096,
-        system: buildSystemPrompt(),
+        system: systemPrompt,
         messages
       });
     }
@@ -2267,9 +2864,9 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
 
     // Send via appropriate channel
     // Save conversation turns to history
-    addToConversationHistory(chatId, 'user', userMessage);
+    await saveTurn(chatId, 'user', userMessage, channel);
     if (reply) {
-      addToConversationHistory(chatId, 'assistant', reply);
+      await saveTurn(chatId, 'assistant', reply, channel);
     }
 
     if (channel === 'whatsapp') {
@@ -2290,6 +2887,11 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       len: reply.length,
       ok: true,
     });
+
+    // Fold aged-out turns into the rolling summary. Deliberately after the
+    // reply is sent and deliberately not awaited — Beverly never waits on
+    // housekeeping, and a failure here is logged, not surfaced.
+    maybeCompress(chatId).catch((err) => console.error(`[MEMORY] compress: ${err.message}`));
   } catch (err) {
     logEvent('REPLY', {
       chat: chatId,
@@ -2309,7 +2911,10 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       errorMsg = "There's an authentication issue with my AI service. Jonathan will need to check the API key.";
     } else if (err?.message?.includes('context') || err?.message?.includes('token')) {
       errorMsg = "That conversation got too long for me to process. Let me start fresh \u2014 please ask your question again.";
-      delete conversationHistory[chatId]; // Clear history to recover
+      // Shrink the replayed window and fold the rest into the summary. Never
+      // delete the stored history here — Beverly's long-term memory must not
+      // be a casualty of one overlong message.
+      resetLiveWindow(chatId).catch((e) => console.error(`[MEMORY] reset: ${e.message}`));
     } else {
       errorMsg = "Sorry, I hit an error processing that. Please try again.";
     }
@@ -2527,11 +3132,62 @@ app.get("/healthz/deep", async (req, res) => {
     odoo: odoo.ok ? "ok" : "FAIL",
     whatsapp: whatsapp.ok ? "ok" : "FAIL",
   });
-  res.status(allOk ? 200 : 503).json({
-    status: allOk ? "ok" : "degraded",
+  // Storage is critical once configured — a Sam that silently stopped
+  // remembering is worse than one that reports itself degraded.
+  const dbConfigured = Boolean(process.env.DATABASE_URL);
+  const dbOk = !dbConfigured || dbAvailable();
+  const overallOk = allOk && dbOk;
+
+  res.status(overallOk ? 200 : 503).json({
+    status: overallOk ? "ok" : "degraded",
     bot: "Sam TRC",
     wallMs: Date.now() - startedAt,
     components,
+    // Optional subsystems. Absent config is a deliberate state, not a fault,
+    // so these do not fail the check unless configured and broken.
+    subsystems: {
+      storage: { configured: dbConfigured, status: dbStatus() },
+      memory: memoryStats(),
+      hermesRouter: routerStats(),
+      marketData: { configured: mkt.marketEnabled() },
+      trading212: { configured: fin.t212Enabled(), access: "read-only" },
+      tools: SAM_TOOLS.length,
+    },
+  });
+});
+
+// What Sam can currently do, and what is switched off for want of a key.
+// Handy when Jonathan asks "why isn't Sam doing X".
+app.get("/healthz/capabilities", (req, res) => {
+  const expected = process.env.HEALTH_TOKEN;
+  if (expected) {
+    const provided = req.get("x-health-token") || req.query.token;
+    if (provided !== expected) return res.status(401).json({ status: "unauthorised" });
+  }
+  res.json({
+    bot: "Sam TRC",
+    principal: "Beverly Cutajar",
+    tools: SAM_TOOLS.length,
+    toolDomains: Object.fromEntries(
+      Object.entries(TOOL_DOMAIN).map(([d, names]) => [d, names.length]),
+    ),
+    capabilities: {
+      durableMemory: dbAvailable(),
+      openItemTracking: dbAvailable(),
+      relationshipTracking: dbAvailable(),
+      portfolioTracking: dbAvailable(),
+      tradeJournal: dbAvailable(),
+      investmentProjections: true,          // pure maths, no dependencies
+      marketData: mkt.marketEnabled(),
+      trading212Import: fin.t212Enabled(),
+      statementImport: routerEnabled() && dbAvailable(),
+      tokenRouting: routerEnabled(),
+      tradeExecution: false,                // deliberate and permanent
+    },
+    notes: {
+      tradeExecution: "Sam has no order-placement path by design. Beverly executes in her own broker.",
+      financialAdvice: "Analysis and information only, never regulated advice.",
+    },
   });
 });
 
@@ -2877,7 +3533,7 @@ app.get("/webhook-info", async (req, res) => {
 if (!ANTHROPIC_API_KEY) { console.error("FATAL: ANTHROPIC_API_KEY not set. Exiting."); process.exit(1); }
 if (!TELEGRAM_TOKEN && !WA_ACCESS_TOKEN) { console.error("FATAL: Neither TELEGRAM_TOKEN nor WA_ACCESS_TOKEN set. Exiting."); process.exit(1); }
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Sam TRC bot running on port ${PORT}`);
   console.log(`Firefish: ${FIREFISH_CLIENT_ID ? "configured" : "NOT SET"}`);
   console.log(`Odoo: ${ODOO_API_KEY ? "configured" : "NOT SET"} (db=${ODOO_DB}, login=${ODOO_LOGIN || "not set"})`);
@@ -2888,11 +3544,29 @@ app.listen(PORT, () => {
   // Structured boot event — operator can grep `[BOOT]` to count restarts per
   // hour/day and spot crash loops in Railway log search. Frequent BOOT lines
   // = trouble even if the every-5-min health monitor never alerted.
+  console.log(`Postgres: ${process.env.DATABASE_URL ? 'configured' : 'NOT SET — memory will not survive restarts'}`);
+  console.log(`Hermes router: ${routerEnabled() ? 'enabled' : 'NOT SET — everything runs on Claude'}`);
+  console.log(`Market data: ${mkt.marketEnabled() ? 'configured' : 'NOT SET'}`);
+  console.log(`Trading 212: ${fin.t212Enabled() ? 'configured (read-only)' : 'NOT SET'}`);
+
+  // Bring up storage before the scheduler, so the first tick can read its
+  // dedupe keys. A failure here is logged and Sam continues in memory-only
+  // mode rather than refusing to boot.
+  const dbUp = await initDb();
+
+  // Proactive cadence: morning brief, Friday debrief, chases, relationship
+  // checks, meeting prep, watchlist alerts.
+  startBeverlyProactive();
+
   logEvent('BOOT', {
     bootedAtIso: new Date().toISOString(),
     port: PORT,
     model: CLAUDE_MODEL,
     adminAlertChats: ADMIN_TELEGRAM_CHAT_IDS.length,
     miloWatchdogTarget: MILO_HEALTH_URL,
+    db: dbUp ? 'ready' : 'memory-only',
+    hermes: routerEnabled(),
+    market: mkt.marketEnabled(),
+    tools: SAM_TOOLS.length,
   });
 });

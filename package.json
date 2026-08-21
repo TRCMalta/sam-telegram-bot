@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/projections.test.mjs && node test/fifo.test.mjs"
+    "test": "node test/projections.test.mjs && node test/fifo.test.mjs && node test/routing.test.mjs",
+    "test:integration": "node test/integration.test.mjs"
   },
   "dependencies": {
     "express": "^4.18.2",
