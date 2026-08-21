@@ -16,9 +16,12 @@
 
 name: CI
 
+# Deliberately NOT triggering on pushes to feature branches. Every branch here
+# gets a PR, and firing on both push and pull_request runs all three jobs twice
+# for the same commit — double the Actions minutes for zero extra signal.
 on:
   push:
-    branches: [main, 'claude/**']
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
