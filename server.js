@@ -13,7 +13,7 @@ import https from "https";
 import http from "http";
 import { synthesizeWhatsappVoice } from "./lib/voice.js";
 import { initDb, dbAvailable, dbStatus } from "./lib/db.js";
-import { classifyDomains, heuristicDomains, condenseToolResult, routerEnabled, routerStats } from "./lib/llm.js";
+import { classifyDomains, heuristicDomains, condenseToolResult, routerEnabled, routerStats, hermes } from "./lib/llm.js";
 import { loadContext, saveTurn, maybeCompress, resetLiveWindow, memoryStats } from "./lib/memory.js";
 import * as items from "./lib/openitems.js";
 import * as fin from "./lib/finance.js";
@@ -3058,6 +3058,45 @@ async function pingOdoo() {
   }
 }
 
+// Verifies the OpenRouter key AND that the configured Hermes model id is
+// actually accepted — a wrong model id is the likeliest misconfiguration here
+// and it fails soft, so without this check the only symptom is a quietly
+// higher Claude bill.
+async function pingHermes() {
+  const t = Date.now();
+  try {
+    if (!routerEnabled()) {
+      return { ok: true, skipped: true, wallMs: 0, note: 'OPENROUTER_API_KEY not set — all work runs on Claude' };
+    }
+    const reply = await hermes('Reply with the single word: pong', { maxTokens: 8 });
+    if (!reply) {
+      return { ok: false, wallMs: Date.now() - t, error: 'no response — check the key and HERMES_MODEL' };
+    }
+    return { ok: true, wallMs: Date.now() - t, model: process.env.HERMES_MODEL || 'nousresearch/hermes-4-70b' };
+  } catch (err) {
+    return { ok: false, wallMs: Date.now() - t, error: String(err.message || err).slice(0, 200) };
+  }
+}
+
+// A live quote proves the Finnhub key works. Finnhub answers an unknown or
+// unauthorised symbol with an all-zero payload rather than an error status, so
+// a zero price is treated as a failure, not as data.
+async function pingMarketData() {
+  const t = Date.now();
+  try {
+    if (!mkt.marketEnabled()) {
+      return { ok: true, skipped: true, wallMs: 0, note: 'FINNHUB_API_KEY not set — no quotes or portfolio valuation' };
+    }
+    const q = await mkt.getQuote('AAPL');
+    if (!q || !q.price) {
+      return { ok: false, wallMs: Date.now() - t, error: 'no price returned — check the key or the rate limit' };
+    }
+    return { ok: true, wallMs: Date.now() - t, sample: `AAPL ${q.price}` };
+  } catch (err) {
+    return { ok: false, wallMs: Date.now() - t, error: String(err.message || err).slice(0, 200) };
+  }
+}
+
 async function pingWhatsApp() {
   const t = Date.now();
   try {
@@ -3114,14 +3153,16 @@ app.get("/healthz/deep", async (req, res) => {
     }
   }
   const startedAt = Date.now();
-  const [claude, msGraph, firefish, odoo, whatsapp] = await Promise.all([
+  const [claude, msGraph, firefish, odoo, whatsapp, hermesRouter, marketData] = await Promise.all([
     pingClaude(),
     pingMsGraph(),
     pingFirefish(),
     pingOdoo(),
     pingWhatsApp(),
+    pingHermes(),
+    pingMarketData(),
   ]);
-  const components = { claude, msGraph, firefish, odoo, whatsapp };
+  const components = { claude, msGraph, firefish, odoo, whatsapp, hermesRouter, marketData };
   const allOk = Object.values(components).every((c) => c.ok);
   logEvent("HEALTHZ_DEEP", {
     status: allOk ? "ok" : "degraded",
@@ -3131,6 +3172,8 @@ app.get("/healthz/deep", async (req, res) => {
     firefish: firefish.ok ? "ok" : "FAIL",
     odoo: odoo.ok ? "ok" : "FAIL",
     whatsapp: whatsapp.ok ? "ok" : "FAIL",
+    hermes: hermesRouter.skipped ? "off" : (hermesRouter.ok ? "ok" : "FAIL"),
+    market: marketData.skipped ? "off" : (marketData.ok ? "ok" : "FAIL"),
   });
   // Storage is critical once configured — a Sam that silently stopped
   // remembering is worse than one that reports itself degraded.
