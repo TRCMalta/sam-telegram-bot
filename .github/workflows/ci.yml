@@ -1,0 +1,132 @@
+# CI for Sam (Beverly's chief of staff).
+#
+# Sam's projection and P&L code produces numbers Beverly may act on
+# financially, and every new integration is optional — which only holds if the
+# "nothing configured" boot path keeps working. Both need a guard that runs
+# without anyone remembering to type `npm test`.
+#
+# Three jobs:
+#   unit        — maths, FIFO, routing. No services, fast.
+#   integration — real Postgres, proves the schema applies and persists.
+#   smoke       — boots the actual server both with and without a database.
+#
+# No secrets are used or needed. Nothing here reaches a live upstream: the
+# tests exercise pure functions, a throwaway database, and a server started
+# with placeholder credentials.
+
+name: CI
+
+on:
+  push:
+    branches: [main, 'claude/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push supersedes an in-flight run on the same branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit — maths, FIFO, routing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the Dockerfile (node:18-alpine) so CI tests what deploys.
+          node-version: '18'
+          cache: npm
+
+      - run: npm ci
+
+      # Catches a syntax error in any module, including ones no test imports.
+      - name: Syntax check every module
+        run: |
+          node --check server.js
+          for f in lib/*.js; do node --check "$f"; done
+
+      - name: Unit tests
+        run: npm test
+
+  integration:
+    name: Integration — real Postgres
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Matches what Railway provisions.
+        image: postgres:16
+        env:
+          POSTGRES_USER: sam
+          POSTGRES_PASSWORD: sam
+          POSTGRES_DB: sam_test
+        ports:
+          - 5432:5432
+        # Without this the job races the container and fails on connect.
+        options: >-
+          --health-cmd "pg_isready -U sam"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Integration tests
+        env:
+          DATABASE_URL: postgres://sam:sam@localhost:5432/sam_test
+          # The service container speaks plaintext on localhost.
+          PGSSL: off
+        run: npm run test:integration
+
+  smoke:
+    name: Smoke — server boots in both modes
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sam
+          POSTGRES_PASSWORD: sam
+          POSTGRES_DB: sam_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sam"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: npm
+
+      - run: npm ci
+
+      # Boots the real server with placeholder credentials and probes
+      # /healthz/capabilities. Proves the degraded path still serves traffic
+      # and that trade execution reports off in every configuration.
+      - name: Boot smoke test
+        env:
+          DATABASE_URL: postgres://sam:sam@localhost:5432/sam_smoke
+          PGSSL: off
+        run: npm run test:smoke

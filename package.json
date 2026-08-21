@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "test": "node test/projections.test.mjs && node test/fifo.test.mjs && node test/routing.test.mjs",
-    "test:integration": "node test/integration.test.mjs"
+    "test:integration": "node test/integration.test.mjs",
+    "test:smoke": "node test/smoke.mjs",
+    "test:all": "npm test && npm run test:integration && npm run test:smoke"
   },
   "dependencies": {
     "express": "^4.18.2",

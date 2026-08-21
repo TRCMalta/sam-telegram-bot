@@ -148,13 +148,24 @@ Both honour `HEALTH_TOKEN` if set.
 ```
 npm test                  # projections (18), FIFO (20), routing (23) — no deps
 npm run test:integration  # 41 checks against a real Postgres
+npm run test:smoke        # boots the real server, both modes
+npm run test:all          # everything
 ```
 
-The integration suite needs a database:
+The integration and smoke suites need a database:
 
 ```
-DATABASE_URL=postgres://... PGSSL=off npm run test:integration
+DATABASE_URL=postgres://... PGSSL=off npm run test:all
 ```
+
+**CI** runs all three on every push and PR (`.github/workflows/ci.yml`), on
+Node 18 to match the Dockerfile, with a `postgres:16` service container. No
+secrets are used — the tests exercise pure functions, a throwaway database, and
+a server started with placeholder credentials. Nothing reaches a live upstream.
+
+The smoke test is the guard on the "everything is optional" promise: it boots
+the real server with nothing configured, proves it still serves traffic, and
+asserts `tradeExecution: false` in every configuration.
 
 The projection maths is verified against a brute-force month-by-month
 simulation, and FIFO cost-basis against hand-computed round trips, because both
