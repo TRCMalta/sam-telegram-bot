@@ -12,7 +12,7 @@ import { Anthropic } from "@anthropic-ai/sdk";
 import https from "https";
 import http from "http";
 import { synthesizeWhatsappVoice } from "./lib/voice.js";
-import { initDb, dbAvailable, dbStatus } from "./lib/db.js";
+import { initDb, dbAvailable, dbStatus, kvGet, kvSet, queueProactive, undeliveredProactive, markProactiveDelivered } from "./lib/db.js";
 import { classifyDomains, heuristicDomains, condenseToolResult, routerEnabled, routerStats, hermes } from "./lib/llm.js";
 import { loadContext, saveTurn, maybeCompress, resetLiveWindow, memoryStats } from "./lib/memory.js";
 import * as items from "./lib/openitems.js";
@@ -122,6 +122,16 @@ const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
 const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN || 'sam_trc_whatsapp_verify';
 const WA_API_VERSION = 'v23.0';
 const BEVERLY_WA_NUMBER = process.env.BEVERLY_WA_NUMBER;
+// Meta-approved template used to nudge Beverly when the 24-hour window is
+// closed. Template sends are the ONE message type Meta allows outside the
+// window; her reply reopens it and the queued briefing is delivered.
+// Register the template once via POST /admin/register-template.
+const WA_TEMPLATE_NAME = (process.env.WA_TEMPLATE_NAME || '').trim();
+const WA_TEMPLATE_LANG = (process.env.WA_TEMPLATE_LANG || 'en').trim();
+// WhatsApp Business Account id — needed only for template registration.
+// Found in Meta WhatsApp Manager (the number in the URL, or Business Settings
+// -> Accounts -> WhatsApp Accounts).
+const WA_WABA_ID = (process.env.WA_WABA_ID || '').trim();
 const ALLOWED_WA_NUMBERS = (process.env.ALLOWED_WA_NUMBERS || BEVERLY_WA_NUMBER || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 const processedWAMessages = new Set();
@@ -2681,14 +2691,136 @@ async function askSamToWrite(instruction, digest) {
   }
 }
 
+/**
+ * Deliver a proactive message to Beverly, loudly.
+ *
+ * WhatsApp is her ONLY channel — she does not use Telegram — and Meta rejects
+ * free-form messages sent more than 24 hours after her last inbound message
+ * (error 131047). Beverly cannot tell "Sam had nothing to say" from "Sam's
+ * briefing was rejected", so a silent drop here is the worst failure mode this
+ * bot has.
+ *
+ * Order:
+ *   1. WhatsApp free-form. Success -> done.
+ *   2. Rejected -> queue the message in Postgres. It is delivered the moment
+ *      her next inbound message reopens the window (see the /whatsapp webhook).
+ *   3. Send the approved template nudge if one is configured — templates are
+ *      the one message type Meta allows outside the window, and her reply is
+ *      exactly what reopens it.
+ *   4. Alert the admin chat naming the cause, so a rejection is never silent.
+ */
+async function sendProactiveToBeverly(text) {
+  const wa = await sendWhatsApp(BEVERLY_WA_NUMBER, text);
+  if (wa.ok) return;
+
+  const windowClosed = wa.code === 131047;
+  logEvent('PROACTIVE_WA_REJECTED', { code: wa.code, error: (wa.error || '').slice(0, 120) });
+
+  let queuedId = null;
+  if (dbAvailable()) {
+    queuedId = await queueProactive(text);
+    if (queuedId) logEvent('PROACTIVE_QUEUED', { id: queuedId, len: text.length });
+  }
+
+  // Nudge at most once per closed-window episode: re-arm after 20h so the
+  // daily briefing can nudge again tomorrow, but six rejected sends in one
+  // quiet day produce one template, not six.
+  let nudged = false;
+  if (windowClosed && WA_TEMPLATE_NAME) {
+    const last = await kvGet('proactive:last-nudge');
+    const lastAt = last?.at ? new Date(last.at).getTime() : 0;
+    if (Date.now() - lastAt > 20 * 3_600_000) {
+      nudged = await sendWhatsAppTemplate(BEVERLY_WA_NUMBER, WA_TEMPLATE_NAME, WA_TEMPLATE_LANG);
+      if (nudged) await kvSet('proactive:last-nudge', { at: new Date().toISOString() });
+    }
+  }
+
+  await alertAdmin(
+    `*Sam: proactive WhatsApp to Beverly rejected*\n\n`
+    + (windowClosed
+        ? `Cause: Meta 24-hour window — Beverly hasn't messaged Sam in over 24h (error 131047).\n`
+        : `Cause: ${wa.error || 'unknown'} (code ${wa.code ?? 'n/a'})\n`)
+    + (queuedId
+        ? `Message queued (#${queuedId}) — she'll get it the moment she next messages Sam.\n`
+        : `NOT queued — database unavailable, this message is lost.\n`)
+    + (windowClosed
+        ? (WA_TEMPLATE_NAME
+            ? (nudged ? `Template nudge sent to reopen the window.\n` : `Template nudge skipped (already nudged recently, or send failed).\n`)
+            : `No template configured — register one via POST /admin/register-template, then set WA_TEMPLATE_NAME.\n`)
+        : '')
+    + `\nMessage began: "${text.slice(0, 120)}..."`,
+  );
+}
+
+/**
+ * Send an approved template message. The only message type Meta permits
+ * outside the 24-hour window. Returns true on success.
+ */
+async function sendWhatsAppTemplate(to, name, lang = 'en') {
+  const dest = String(to).replace(/^wa_/, '');
+  try {
+    await fetchJSON(
+      `https://graph.facebook.com/${WA_API_VERSION}/${WA_PHONE_NUMBER_ID}/messages`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${WA_ACCESS_TOKEN}` },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          to: dest,
+          type: 'template',
+          template: { name, language: { code: lang } },
+        }),
+      },
+    );
+    logEvent('TEMPLATE_SENT', { name, to: dest.slice(-4) });
+    return true;
+  } catch (err) {
+    console.error(`[TEMPLATE] send failed: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Deliver anything that queued up while Beverly's window was closed.
+ *
+ * Called from the /whatsapp webhook the moment she messages Sam — her inbound
+ * message is precisely what reopens the window, so these sends will succeed.
+ * Runs before her message is answered so the missed briefing reads in order.
+ */
+async function flushPendingProactive(senderNumber) {
+  if (!dbAvailable()) return;
+  if (senderNumber !== BEVERLY_WA_NUMBER) return;
+  try {
+    const pending = await undeliveredProactive(5);
+    if (!pending.length) return;
+    const delivered = [];
+    for (const p of pending) {
+      const when = new Date(p.created_at).toLocaleString('en-GB', {
+        timeZone: 'Europe/Malta', weekday: 'short', hour: '2-digit', minute: '2-digit',
+      });
+      const r = await sendWhatsApp(BEVERLY_WA_NUMBER, `While you were away (${when}):\n\n${p.body}`);
+      if (r.ok) delivered.push(p.id);
+      else break; // window somehow still closed — keep the rest queued
+    }
+    if (delivered.length) {
+      await markProactiveDelivered(delivered);
+      logEvent('PROACTIVE_FLUSHED', { count: delivered.length });
+    }
+  } catch (err) {
+    console.error(`[PROACTIVE] flush failed: ${err.message}`);
+  }
+}
+
 function startBeverlyProactive() {
   if (!BEVERLY_WA_NUMBER) {
     logEvent('PROACTIVE_SKIP', { reason: 'BEVERLY_WA_NUMBER not set' });
     return null;
   }
   return startProactive({
-    send: (text) => sendWhatsApp(BEVERLY_WA_NUMBER, text),
-    // Jonathan's rule: the morning brief goes out in text and voice.
+    send: sendProactiveToBeverly,
+    // Jonathan's rule: the morning brief goes out in text and voice. Voice is
+    // additive — if WhatsApp rejected the text, the voice note will fail the
+    // same way and sendVoiceReply already swallows that quietly.
     sendVoice: (text) => sendVoiceReply(BEVERLY_WA_NUMBER, text),
     ask: askSamToWrite,
     getCalendar: getBeverlyCalendarEvents,
@@ -2973,6 +3105,17 @@ async function sendVoiceReply(to, text) {
   } catch (e) { console.error("[VOICE] Sam voice reply failed:", e.message); }
 }
 
+/**
+ * Send a WhatsApp text, chunked to Meta's 4096-char message limit.
+ *
+ * Returns { ok, code, error } rather than throwing, and callers that ignore
+ * the return value behave exactly as before. The return value matters for
+ * PROACTIVE sends: Meta only allows free-form messages within 24 hours of the
+ * recipient's last inbound message (error code 131047 outside it), so a
+ * morning briefing to a Beverly who went quiet yesterday is rejected — and
+ * this function used to swallow that rejection into a console line nobody
+ * reads. sendProactiveToBeverly() now uses the result to fall back and alert.
+ */
 async function sendWhatsApp(to, text) {
   const dest = String(to).replace(/^wa_/, ""); // handleMessage keys WA chats as wa_<number>
   const chunks = [];
@@ -2981,6 +3124,7 @@ async function sendWhatsApp(to, text) {
     chunks.push(remaining.substring(0, 4000));
     remaining = remaining.substring(4000);
   }
+  const result = { ok: true, code: null, error: null };
   for (const chunk of chunks) {
     try {
       await fetchJSON(
@@ -3002,8 +3146,13 @@ async function sendWhatsApp(to, text) {
       );
     } catch (err) {
       console.error('WhatsApp send error:', err.message);
+      result.ok = false;
+      result.error = String(err.message || err).slice(0, 300);
+      // Meta's error shape: { error: { code, message, ... } }
+      result.code = err.body?.error?.code ?? err.statusCode ?? null;
     }
   }
+  return result;
 }
 
 // ─── Upstream health pings (used by /healthz/deep + daily self-test) ─────────
@@ -3288,6 +3437,68 @@ app.get("/set-webhook", async (req, res) => {
 
 
 // ─── WhatsApp Webhook Verification (GET) ────────────────────────────────────────────────────────────
+// One-time setup: register Sam's nudge template with Meta, using Sam's own
+// credentials. Jonathan cannot create it by hand any more (no direct access to
+// Sam), and this session cannot reach Business Manager — so Sam does it
+// himself. Requires the access token to carry whatsapp_business_management;
+// if it only has whatsapp_business_messaging, Meta refuses and the response
+// says so, in which case the template must be created once in Business
+// Manager (WhatsApp Manager -> Message templates) with the same name/body.
+//
+//   curl -X POST -H "x-health-token: $HEALTH_TOKEN" https://<sam>/admin/register-template
+//
+// On success Meta returns PENDING; UTILITY templates usually approve within
+// minutes. Then set WA_TEMPLATE_NAME=sam_briefing_ready on the service.
+app.post('/admin/register-template', async (req, res) => {
+  const expected = process.env.HEALTH_TOKEN;
+  if (expected) {
+    const provided = req.get('x-health-token') || req.query.token;
+    if (provided !== expected) return res.status(401).json({ status: 'unauthorised' });
+  }
+  if (!WA_ACCESS_TOKEN) return res.status(400).json({ error: 'WA_ACCESS_TOKEN not set' });
+  if (!WA_WABA_ID) {
+    return res.status(400).json({
+      error: 'WA_WABA_ID not set',
+      hint: 'The WhatsApp Business Account id. Meta Business Settings -> Accounts -> WhatsApp Accounts, or the id in the WhatsApp Manager URL. Set it on the Railway service and retry.',
+    });
+  }
+  const template = {
+    name: 'sam_briefing_ready',
+    language: 'en',
+    category: 'UTILITY',
+    components: [{
+      type: 'BODY',
+      text: 'Good morning Beverly. Your update from Sam is ready — reply to this message and I will send it straight over.',
+    }],
+  };
+  try {
+    const meta = await fetchJSON(
+      `https://graph.facebook.com/${WA_API_VERSION}/${WA_WABA_ID}/message_templates`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${WA_ACCESS_TOKEN}` },
+        body: JSON.stringify(template),
+      },
+    );
+    logEvent('TEMPLATE_REGISTERED', { name: template.name, status: meta.status || 'submitted' });
+    res.json({
+      ok: true,
+      submitted: template.name,
+      meta,
+      next: `Once Meta approves (status APPROVED in WhatsApp Manager), set WA_TEMPLATE_NAME=${template.name} on the Railway service and redeploy.`,
+    });
+  } catch (err) {
+    logEvent('TEMPLATE_REGISTER_FAIL', { error: String(err.message || err).slice(0, 200) });
+    res.status(502).json({
+      ok: false,
+      error: String(err.message || err).slice(0, 400),
+      hint: err.body?.error?.code === 200 || /permission/i.test(String(err.message))
+        ? 'The access token lacks whatsapp_business_management. Create the template manually in WhatsApp Manager -> Message templates with the exact name and body from this endpoint\'s source, then set WA_TEMPLATE_NAME.'
+        : 'Check WA_WABA_ID and the access token, then retry.',
+    });
+  }
+});
+
 app.get('/whatsapp', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -3342,6 +3553,11 @@ app.post('/whatsapp', async (req, res) => {
       await sendWhatsApp(senderNumber, 'This bot is restricted to authorised users.');
       return;
     }
+
+    // Her inbound message just reopened Meta's 24-hour window — deliver
+    // anything that was rejected while it was closed, before answering her,
+    // so the missed briefing reads in order.
+    await flushPendingProactive(senderNumber);
 
       // Mark message as read (blue ticks)
       try {

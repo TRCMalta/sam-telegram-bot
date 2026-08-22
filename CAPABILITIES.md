@@ -96,6 +96,45 @@ handles only work Beverly never reads. Her replies stay on Claude.
 | `T212_ENV` | `live` (default) or `demo` |
 | `BASE_CURRENCY` | default `EUR` |
 
+### Proactive delivery — the WhatsApp 24-hour window
+
+Meta's WhatsApp Business API rejects free-form messages sent more than 24
+hours after the recipient's last inbound message (error `131047`). Every
+proactive message Sam sends is free-form, so **a briefing to a Beverly who
+went quiet yesterday is refused** — and she cannot tell "Sam had nothing to
+say" apart from "Sam's message was rejected".
+
+What Sam does about it (Beverly uses WhatsApp only — there is no other
+channel to fall back to):
+
+1. The rejected message is **queued in Postgres** and delivered the moment her
+   next inbound message reopens the window, prefixed "While you were away".
+   Capped at the 5 oldest so a long absence doesn't flood her.
+2. If a template is configured, Sam sends the **approved template nudge** —
+   templates are the one message type Meta allows outside the window, and her
+   reply is exactly what reopens it. At most one nudge per 20 hours.
+3. Either way the **admin Telegram chat is alerted** with the cause, so a
+   rejection is never silent.
+
+**One-time template setup.** Sam registers his own template with Meta:
+
+```
+curl -X POST -H "x-health-token: $HEALTH_TOKEN" https://<sam>/admin/register-template
+```
+
+Needs `WA_WABA_ID` set (the WhatsApp Business Account id — Meta Business
+Settings → Accounts → WhatsApp Accounts). Submits `sam_briefing_ready`
+(category UTILITY, usually approved in minutes). If the access token lacks
+`whatsapp_business_management`, Meta refuses and the response says so — in
+that case create the template manually in WhatsApp Manager → Message
+templates with the same name and body, then set `WA_TEMPLATE_NAME`.
+
+| Variable | Purpose |
+|---|---|
+| `WA_WABA_ID` | WhatsApp Business Account id — template registration only |
+| `WA_TEMPLATE_NAME` | approved template to nudge with (e.g. `sam_briefing_ready`) |
+| `WA_TEMPLATE_LANG` | template language code, default `en` |
+
 ### Proactive schedule (all optional)
 
 | Variable | Default | |

@@ -7,7 +7,7 @@
  *
  * Run: DATABASE_URL=postgres://... node test/integration.test.mjs
  */
-import { initDb, dbAvailable, q, kvGet, kvSet, closeDb } from "../lib/db.js";
+import { initDb, dbAvailable, q, kvGet, kvSet, queueProactive, undeliveredProactive, markProactiveDelivered, closeDb } from "../lib/db.js";
 import * as mem from "../lib/memory.js";
 import * as items from "../lib/openitems.js";
 import * as fin from "../lib/finance.js";
@@ -22,7 +22,7 @@ ok(up && dbAvailable(), "initDb applied the schema");
 // Start from a clean slate. These assertions count rows, so leftover data from
 // a previous run would fail them for the wrong reason.
 await q(`TRUNCATE conversations, conversation_summaries, open_items, relationships,
-         kv, holdings, trades, trade_journal, watchlist RESTART IDENTITY CASCADE`);
+         kv, holdings, trades, trade_journal, watchlist, pending_proactive RESTART IDENTITY CASCADE`);
 
 // Idempotent: boot runs this every time, so a redeploy must not fail.
 ok(await initDb(), "initDb is idempotent (safe on every boot)");
@@ -123,6 +123,23 @@ ok(wl.length === 1 && wl[0].symbol === "TSLA" && Number(wl[0].alert_below) === 2
 await fin.addToWatchlist({ symbol: "TSLA", alertBelow: 180 });
 ok(Number((await fin.listWatchlist())[0].alert_below) === 180, "re-adding updates the level rather than duplicating");
 ok(await fin.removeFromWatchlist("TSLA"), "watchlist remove");
+
+console.log("\n— pending proactive queue —");
+{
+  const id1 = await queueProactive("Morning briefing that Meta rejected");
+  const id2 = await queueProactive("Watchlist alert that Meta rejected");
+  ok(id1 && id2 && id2 > id1, "rejected messages queue with ordered ids");
+  const pending = await undeliveredProactive();
+  ok(pending.length === 2 && pending[0].id === id1, "undelivered returns oldest first");
+  await markProactiveDelivered([id1]);
+  const after = await undeliveredProactive();
+  ok(after.length === 1 && after[0].id === id2, "delivered item leaves the queue, rest remain");
+  // Partial-failure semantics: flush marks only what actually sent.
+  await markProactiveDelivered([]);
+  ok((await undeliveredProactive()).length === 1, "empty mark is a no-op");
+  for (let i = 0; i < 7; i++) await queueProactive(`backlog ${i}`);
+  ok((await undeliveredProactive(5)).length === 5, "flush cap of 5 respected — a long absence doesn't flood her");
+}
 
 console.log("\n— discipline —");
 const disc = await fin.tradingDiscipline({ days: 3650 });
