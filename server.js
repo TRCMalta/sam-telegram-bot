@@ -122,6 +122,10 @@ const WA_PHONE_NUMBER_ID = process.env.WA_PHONE_NUMBER_ID;
 const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN || 'sam_trc_whatsapp_verify';
 const WA_API_VERSION = 'v23.0';
 const BEVERLY_WA_NUMBER = process.env.BEVERLY_WA_NUMBER;
+// Beverly's Telegram chat id, used ONLY as the fallback route when a proactive
+// WhatsApp send is rejected (usually Meta's 24-hour window). Optional — without
+// it the failure still alerts the admin chat instead of vanishing.
+const BEVERLY_TG_CHAT_ID = (process.env.BEVERLY_TG_CHAT_ID || '').trim();
 const ALLOWED_WA_NUMBERS = (process.env.ALLOWED_WA_NUMBERS || BEVERLY_WA_NUMBER || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 const processedWAMessages = new Set();
@@ -2681,14 +2685,62 @@ async function askSamToWrite(instruction, digest) {
   }
 }
 
+/**
+ * Deliver a proactive message to Beverly, loudly.
+ *
+ * WhatsApp is her main channel, but Meta rejects free-form messages sent more
+ * than 24 hours after her last inbound message (error 131047). Beverly cannot
+ * tell the difference between "Sam had nothing to say" and "Sam's briefing was
+ * rejected", so a silent drop here is the worst failure mode this bot has.
+ *
+ * Order:
+ *   1. WhatsApp. Success -> done.
+ *   2. Rejected -> Telegram to Beverly directly, if BEVERLY_TG_CHAT_ID is set.
+ *   3. Either way a rejection alerts the admin chat, naming the cause —
+ *      a 131047 means the 24-hour window, which a Meta-approved template
+ *      would fix properly (see CAPABILITIES.md).
+ */
+async function sendProactiveToBeverly(text) {
+  const wa = await sendWhatsApp(BEVERLY_WA_NUMBER, text);
+  if (wa.ok) return;
+
+  const windowClosed = wa.code === 131047;
+  logEvent('PROACTIVE_WA_REJECTED', { code: wa.code, error: (wa.error || '').slice(0, 120) });
+
+  let delivered = false;
+  if (BEVERLY_TG_CHAT_ID) {
+    try {
+      await sendTelegram(BEVERLY_TG_CHAT_ID, text);
+      delivered = true;
+      logEvent('PROACTIVE_TG_FALLBACK', { len: text.length });
+    } catch (err) {
+      console.error(`[PROACTIVE] Telegram fallback failed: ${err.message}`);
+    }
+  }
+
+  await alertAdmin(
+    `*Sam: proactive WhatsApp to Beverly rejected*\n\n`
+    + (windowClosed
+        ? `Cause: Meta 24-hour window — Beverly hasn't messaged Sam in over 24h, so free-form sends are refused (error 131047). `
+          + `The proper fix is an approved template message in Meta Business Manager.\n`
+        : `Cause: ${wa.error || 'unknown'} (code ${wa.code ?? 'n/a'})\n`)
+    + (delivered
+        ? `Delivered to her on Telegram instead.\n`
+        : `NOT delivered anywhere — BEVERLY_TG_CHAT_ID is not set, so there was no fallback route.\n`)
+    + `\nMessage began: "${text.slice(0, 120)}..."`,
+  );
+}
+
 function startBeverlyProactive() {
   if (!BEVERLY_WA_NUMBER) {
     logEvent('PROACTIVE_SKIP', { reason: 'BEVERLY_WA_NUMBER not set' });
     return null;
   }
   return startProactive({
-    send: (text) => sendWhatsApp(BEVERLY_WA_NUMBER, text),
-    // Jonathan's rule: the morning brief goes out in text and voice.
+    send: sendProactiveToBeverly,
+    // Jonathan's rule: the morning brief goes out in text and voice. Voice is
+    // additive — if WhatsApp rejected the text, the voice note will fail the
+    // same way and sendVoiceReply already swallows that quietly.
     sendVoice: (text) => sendVoiceReply(BEVERLY_WA_NUMBER, text),
     ask: askSamToWrite,
     getCalendar: getBeverlyCalendarEvents,
@@ -2973,6 +3025,17 @@ async function sendVoiceReply(to, text) {
   } catch (e) { console.error("[VOICE] Sam voice reply failed:", e.message); }
 }
 
+/**
+ * Send a WhatsApp text, chunked to Meta's 4096-char message limit.
+ *
+ * Returns { ok, code, error } rather than throwing, and callers that ignore
+ * the return value behave exactly as before. The return value matters for
+ * PROACTIVE sends: Meta only allows free-form messages within 24 hours of the
+ * recipient's last inbound message (error code 131047 outside it), so a
+ * morning briefing to a Beverly who went quiet yesterday is rejected — and
+ * this function used to swallow that rejection into a console line nobody
+ * reads. sendProactiveToBeverly() now uses the result to fall back and alert.
+ */
 async function sendWhatsApp(to, text) {
   const dest = String(to).replace(/^wa_/, ""); // handleMessage keys WA chats as wa_<number>
   const chunks = [];
@@ -2981,6 +3044,7 @@ async function sendWhatsApp(to, text) {
     chunks.push(remaining.substring(0, 4000));
     remaining = remaining.substring(4000);
   }
+  const result = { ok: true, code: null, error: null };
   for (const chunk of chunks) {
     try {
       await fetchJSON(
@@ -3002,8 +3066,13 @@ async function sendWhatsApp(to, text) {
       );
     } catch (err) {
       console.error('WhatsApp send error:', err.message);
+      result.ok = false;
+      result.error = String(err.message || err).slice(0, 300);
+      // Meta's error shape: { error: { code, message, ... } }
+      result.code = err.body?.error?.code ?? err.statusCode ?? null;
     }
   }
+  return result;
 }
 
 // ─── Upstream health pings (used by /healthz/deep + daily self-test) ─────────

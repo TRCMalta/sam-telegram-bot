@@ -96,6 +96,29 @@ handles only work Beverly never reads. Her replies stay on Claude.
 | `T212_ENV` | `live` (default) or `demo` |
 | `BASE_CURRENCY` | default `EUR` |
 
+### Proactive delivery — the WhatsApp 24-hour window
+
+Meta's WhatsApp Business API rejects free-form messages sent more than 24
+hours after the recipient's last inbound message (error `131047`). Every
+proactive message Sam sends is free-form, so **a briefing to a Beverly who
+went quiet yesterday is refused** — and she cannot tell "Sam had nothing to
+say" apart from "Sam's message was rejected".
+
+What Sam does about it:
+
+1. Rejected proactive sends now **alert the admin Telegram chat** with the
+   cause, instead of dying in a console line.
+2. If `BEVERLY_TG_CHAT_ID` is set, the message is **delivered to Beverly on
+   Telegram instead**, so she gets it either way.
+3. The proper fix is a **Meta-approved template message** (created in Meta
+   Business Manager) — e.g. "Good morning Beverly — your briefing is ready" —
+   whose reply reopens the 24-hour window. That is an account task, not code;
+   until it exists, keep `BEVERLY_TG_CHAT_ID` set.
+
+| Variable | Purpose |
+|---|---|
+| `BEVERLY_TG_CHAT_ID` | Beverly's Telegram chat id — proactive fallback route |
+
 ### Proactive schedule (all optional)
 
 | Variable | Default | |
