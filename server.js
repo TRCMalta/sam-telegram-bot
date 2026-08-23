@@ -20,7 +20,7 @@ import * as fin from "./lib/finance.js";
 import * as mkt from "./lib/market.js";
 import { projectInvestment, formatProjection, RETURN_PRESETS } from "./lib/projections.js";
 import { startProactive } from "./lib/proactive.js";
-import { notifyGordon, describeProactiveRejection } from "./lib/gordon.js";
+import { notifyGordon, describeProactiveRejection, gordonEnabled } from "./lib/gordon.js";
 
 const app = express();
 app.use(express.json());
@@ -3373,6 +3373,7 @@ app.get("/healthz/deep", async (req, res) => {
       hermesRouter: routerStats(),
       marketData: { configured: mkt.marketEnabled() },
       trading212: { configured: fin.t212Enabled(), access: "read-only" },
+      gordon: { configured: gordonEnabled(), access: "outbound alerts only" },
       tools: SAM_TOOLS.length,
     },
   });
@@ -3404,6 +3405,7 @@ app.get("/healthz/capabilities", (req, res) => {
       trading212Import: fin.t212Enabled(),
       statementImport: routerEnabled() && dbAvailable(),
       tokenRouting: routerEnabled(),
+      gordonAlerts: gordonEnabled(),
       tradeExecution: false,                // deliberate and permanent
     },
     notes: {
@@ -3850,6 +3852,7 @@ app.listen(PORT, () => {
   console.log(`Hermes router: ${routerEnabled() ? 'enabled' : 'NOT SET — everything runs on Claude'}`);
   console.log(`Market data: ${mkt.marketEnabled() ? 'configured' : 'NOT SET'}`);
   console.log(`Trading 212: ${fin.t212Enabled() ? 'configured (read-only)' : 'NOT SET'}`);
+  console.log(`Gordon: ${gordonEnabled() ? 'configured' : 'NOT SET — ops alerts stay on ADMIN_TELEGRAM_CHAT_IDS only'}`);
 
   // Proactive cadence: morning brief, Friday debrief, chases, relationship
   // checks, meeting prep, watchlist alerts. Storage is already up by here, so
