@@ -1,6 +1,6 @@
 # Sam — capabilities and configuration
 
-Sam is Beverly Cutajar's AI chief of staff. Node/Express service on Railway
+Sam is Beverly Cutajar Shaw's AI chief of staff. Node/Express service on Railway
 (project `cheerful-connection`, service `sam-telegram-bot`), reaching Beverly on
 **Telegram and WhatsApp**, with voice replies.
 

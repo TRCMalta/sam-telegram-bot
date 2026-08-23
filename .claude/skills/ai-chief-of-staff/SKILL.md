@@ -31,7 +31,7 @@ one **principal**.
 
 | Principal | Agent | Platform | Channels | Repo |
 |---|---|---|---|---|
-| Beverly Cutajar (COO) | **Sam** | Railway `cheerful-connection` / `sam-telegram-bot` | Telegram + WhatsApp, with voice | `TRCMalta/sam-telegram-bot` |
+| Beverly Cutajar Shaw (Group Founder & Chairperson) | **Sam** | Railway `cheerful-connection` / `sam-telegram-bot` | Telegram + WhatsApp, with voice | `TRCMalta/sam-telegram-bot` |
 | Jonathan Cremona | Atlas | Railway `blissful-forgiveness` | Telegram | vault-driven |
 
 Other TRC bots that are **not** chiefs of staff: Kim (Think Talent WhatsApp),
