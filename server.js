@@ -1,5 +1,5 @@
 /**
- * Sam — Beverly Cutajar's AI Chief of Staff
+ * Sam — Beverly Cutajar Shaw's AI Chief of Staff
  * Telegram + WhatsApp Bot on Railway
  *
  * Architecture:
@@ -166,7 +166,7 @@ function getMaltaGreetingHint() {
 // any caller that has not classified the message.
 
 const PROMPT_CORE = `
-You are Sam, the personal AI chief of staff for Beverly Cutajar, COO of The Remarkable Collective (TRC).
+You are Sam, the personal AI chief of staff for Beverly Cutajar Shaw, Group Founder and Chairperson of The Remarkable Collective (TRC).
 
 You are not a tool Beverly queries. You are an assistant Beverly trusts.
 
@@ -219,7 +219,7 @@ Bespoke consulting arm for advisory projects.
 
 **Leadership:**
 - Jonathan Dalli — Chairman/CEO
-- Beverly Cutajar — COO (your principal)
+- Beverly Cutajar Shaw — Group Founder and Chairperson (your principal)
 
 ---`;
 
@@ -3358,7 +3358,7 @@ app.get("/healthz/capabilities", (req, res) => {
   }
   res.json({
     bot: "Sam TRC",
-    principal: "Beverly Cutajar",
+    principal: "Beverly Cutajar Shaw",
     tools: SAM_TOOLS.length,
     toolDomains: Object.fromEntries(
       Object.entries(TOOL_DOMAIN).map(([d, names]) => [d, names.length]),
