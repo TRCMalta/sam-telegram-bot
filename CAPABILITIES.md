@@ -169,31 +169,6 @@ Both optional. Unset means Sam's alerts only reach `ADMIN_TELEGRAM_CHAT_IDS`, ex
 | `STALE_DAY` / `STALE_HOUR` | `Mon` / `9` | relationships gone quiet |
 | `MEETING_PREP_MINS` | `30` | prep note ahead of a calendar event |
 | `WATCHLIST_ALERTS` | `on` | `off` to silence price alerts |
-| `PROACTIVE_CATCHUP_HOURS` | `4` | how late a missed once-a-day/week send may still catch up |
-| `PROACTIVE_RETRY_DELAY_MS` | `5000` | pause before retrying a failed Claude write for a scheduled digest |
-
-**Missed-tick resilience.** Each once-a-day/week send (morning briefing, Friday
-debrief, overdue chase, stale-relationship check) used to fire only inside a
-single 5-minute window; a restart or a stalled event loop landing on exactly
-that window silently skipped the whole day. Each now catches up for
-`PROACTIVE_CATCHUP_HOURS` hours after its scheduled time — the next tick that
-actually runs still sends it. The existing dedupe key (Postgres `kv`, or an
-in-memory set without a database) guarantees this can only rescue a miss, never
-cause a duplicate.
-
-If Claude fails to write a scheduled digest — a rate limit, an outage, a bad
-key — Sam retries once after `PROACTIVE_RETRY_DELAY_MS`, then, if it still has
-nothing, alerts `ADMIN_TELEGRAM_CHAT_IDS`/Gordon by name (e.g. *"Sam: morning
-briefing generation failed"*) instead of silently sending nothing. Previously
-this was indistinguishable from "nothing to report".
-
-**Malta public holidays.** On one of Malta's 14 national public holidays (13
-fixed dates plus Good Friday, computed from Easter — see
-`lib/malta-holidays.js`), the 07:00 slot sends a short holiday greeting
-instead of the normal briefing — no pipeline, no open items, no agenda. Always
-in Sam's voice via Claude, with a canned fallback (naming the actual holiday)
-if that call fails, since a greeting is low-stakes enough not to need the
-retry/alert path above.
 
 ### Memory tuning
 
@@ -244,7 +219,7 @@ Both honour `HEALTH_TOKEN` if set.
 ## Tests
 
 ```
-npm test                  # projections (18), FIFO (20), routing (23), Malta holidays, proactive scheduler — no deps
+npm test                  # projections (18), FIFO (20), routing (23) — no deps
 npm run test:integration  # 41 checks against a real Postgres
 npm run test:smoke        # boots the real server, both modes
 npm run test:all          # everything
