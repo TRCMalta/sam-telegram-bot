@@ -135,6 +135,30 @@ templates with the same name and body, then set `WA_TEMPLATE_NAME`.
 | `WA_TEMPLATE_NAME` | approved template to nudge with (e.g. `sam_briefing_ready`) |
 | `WA_TEMPLATE_LANG` | template language code, default `en` |
 
+### Gordon — cross-agent ops visibility (optional)
+
+Gordon is a separate autonomous engineer that watches all of TRC's bots from
+a Telegram ops group (Jonathan + Rachel), with tools to read logs and fix
+milo-api. He has no tools pointed at Sam and no write access to this repo —
+this integration is one-way visibility only: Sam tells Gordon's group when
+something operational is wrong, the same alerts that already go to
+`ADMIN_TELEGRAM_CHAT_IDS`, just to a second channel.
+
+**What Sam sends Gordon**, all three existing `alertAdmin()` calls:
+milo-api watchdog down/recovered, and a proactive WhatsApp send to Beverly
+getting rejected. Deliberately **not** a preview of what Sam was telling
+her — Gordon's group has members beyond whoever is on
+`ADMIN_TELEGRAM_CHAT_IDS`, so that content stays out of it. See
+`lib/gordon.js`'s `describeProactiveRejection()` for exactly what crosses
+that boundary, and `test/gordon.test.mjs` for the tests that hold it there.
+
+| Variable | Purpose |
+|---|---|
+| `GORDON_INTERNAL_URL` | Gordon's Railway public domain, e.g. `https://gordon-production-xxxx.up.railway.app` |
+| `GORDON_ALERT_SECRET` | must equal Gordon's own `TELEGRAM_WEBHOOK_SECRET` — copied by hand from the `gordon` Railway service (a different Railway project than Sam's, so no `${{cross-project}}` reference shortcut applies). A mismatch fails silently: Gordon 401s, nothing errors visibly, this channel just stays dark. |
+
+Both optional. Unset means Sam's alerts only reach `ADMIN_TELEGRAM_CHAT_IDS`, exactly as before this was added.
+
 ### Proactive schedule (all optional)
 
 | Variable | Default | |

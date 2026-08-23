@@ -20,6 +20,7 @@ import * as fin from "./lib/finance.js";
 import * as mkt from "./lib/market.js";
 import { projectInvestment, formatProjection, RETURN_PRESETS } from "./lib/projections.js";
 import { startProactive } from "./lib/proactive.js";
+import { notifyGordon, describeProactiveRejection } from "./lib/gordon.js";
 
 const app = express();
 app.use(express.json());
@@ -1601,23 +1602,43 @@ async function sendTelegram(chatId, text) {
  * but never thrown, so a single dead chat id cannot block delivery to
  * the others.
  */
-async function alertAdmin(text) {
+/**
+ * @param text      full alert body for Sam's own admin Telegram chat.
+ * @param opts.title      short label for Gordon (lib/gordon.js). Falls back to
+ *                        the first line of text if omitted.
+ * @param opts.gordonText body for Gordon, separate from `text`. Gordon's group
+ *                        has more members than Sam's admin chat (Jonathan +
+ *                        Rachel), so this should carry operational facts only
+ *                        — never a preview of what Sam was telling Beverly.
+ *                        Falls back to `text` if omitted, so existing callers
+ *                        that have nothing sensitive to strip need not change.
+ * @param opts.severity   'info' | 'warning' | 'critical', passed to Gordon.
+ */
+async function alertAdmin(text, { title, gordonText, severity = 'warning' } = {}) {
   if (ADMIN_TELEGRAM_CHAT_IDS.length === 0) {
     console.warn(`[ALERT] ADMIN_TELEGRAM_CHAT_IDS empty — dropping alert: ${text.slice(0, 200)}`);
-    return;
-  }
-  if (!TELEGRAM_TOKEN) {
+  } else if (!TELEGRAM_TOKEN) {
     console.warn(`[ALERT] TELEGRAM_TOKEN missing — dropping alert: ${text.slice(0, 200)}`);
-    return;
-  }
-  for (const chatId of ADMIN_TELEGRAM_CHAT_IDS) {
-    try {
-      await sendTelegram(chatId, text);
-      logEvent('ALERT_SENT', { chat: chatId, len: text.length });
-    } catch (err) {
-      console.error(`[ALERT] Failed to deliver to chat ${chatId}: ${err.message}`);
+  } else {
+    for (const chatId of ADMIN_TELEGRAM_CHAT_IDS) {
+      try {
+        await sendTelegram(chatId, text);
+        logEvent('ALERT_SENT', { chat: chatId, len: text.length });
+      } catch (err) {
+        console.error(`[ALERT] Failed to deliver to chat ${chatId}: ${err.message}`);
+      }
     }
   }
+
+  // Gordon is a bonus channel (lib/gordon.js): no-ops entirely when unconfigured,
+  // and runs regardless of whether the admin Telegram send above succeeded —
+  // an empty ADMIN_TELEGRAM_CHAT_IDS must not also silence Gordon.
+  const gordonOk = await notifyGordon(
+    title || text.split('\n')[0].replace(/\*/g, '').slice(0, 100),
+    gordonText || text,
+    severity,
+  );
+  if (gordonOk) logEvent('GORDON_NOTIFIED', { title, severity });
 }
 
 async function sendTypingAction(chatId) {
@@ -2593,7 +2614,10 @@ setInterval(async () => {
       miloWatchdog.isDown = false;
       miloWatchdog.consecutiveFailures = 0;
       logEvent('MILO_RECOVERED', { wallMs: Date.now() - t });
-      await alertAdmin('Milo-api recovered — Sam monitor is back online.');
+      await alertAdmin('Milo-api recovered — Sam monitor is back online.', {
+        title: 'Milo-api watchdog: recovered',
+        severity: 'info',
+      });
     }
     miloWatchdog.consecutiveFailures = 0;
     return;
@@ -2619,6 +2643,7 @@ setInterval(async () => {
       + `Sam itself is still healthy if you got this message, but if Sam *also* goes down `
       + `between now and milo-api recovery, only the external uptime monitor will catch it. `
       + `Open Railway dashboard, project feisty-vision, service milo-api, and check the deploy / logs.`,
+      { title: 'Milo-api watchdog: DOWN', severity: 'critical' },
     );
   }
 }, 5 * 60 * 1000);
@@ -2735,20 +2760,25 @@ async function sendProactiveToBeverly(text) {
     }
   }
 
+  // Built once, reused for both destinations. Gordon's copy stops here —
+  // deliberately no content preview, since Gordon's group has members beyond
+  // whoever is on ADMIN_TELEGRAM_CHAT_IDS. See lib/gordon.js for why this is
+  // a standalone pure function rather than inlined.
+  const facts = describeProactiveRejection({
+    windowClosed, waError: wa.error, waCode: wa.code, queuedId,
+    templateConfigured: Boolean(WA_TEMPLATE_NAME), nudged,
+  });
+
   await alertAdmin(
-    `*Sam: proactive WhatsApp to Beverly rejected*\n\n`
-    + (windowClosed
-        ? `Cause: Meta 24-hour window — Beverly hasn't messaged Sam in over 24h (error 131047).\n`
-        : `Cause: ${wa.error || 'unknown'} (code ${wa.code ?? 'n/a'})\n`)
-    + (queuedId
-        ? `Message queued (#${queuedId}) — she'll get it the moment she next messages Sam.\n`
-        : `NOT queued — database unavailable, this message is lost.\n`)
-    + (windowClosed
-        ? (WA_TEMPLATE_NAME
-            ? (nudged ? `Template nudge sent to reopen the window.\n` : `Template nudge skipped (already nudged recently, or send failed).\n`)
-            : `No template configured — register one via POST /admin/register-template, then set WA_TEMPLATE_NAME.\n`)
-        : '')
-    + `\nMessage began: "${text.slice(0, 120)}..."`,
+    `*Sam: proactive WhatsApp to Beverly rejected*\n\n${facts}\nMessage began: "${text.slice(0, 120)}..."`,
+    {
+      title: 'Sam: proactive WhatsApp to Beverly rejected',
+      gordonText: facts,
+      // The routine 24h-window case is handled gracefully (queued + nudge),
+      // so it's a warning; anything else is an unrecognised WhatsApp API
+      // failure worth Gordon's operators seeing as critical.
+      severity: windowClosed ? 'warning' : 'critical',
+    },
   );
 }
 
