@@ -218,8 +218,8 @@ MFHEA-licensed training and coaching consultancy.
 Bespoke consulting arm for advisory projects.
 
 **Leadership:**
-- Jonathan Dalli — Chairman/CEO
 - Beverly Cutajar Shaw — Group Founder and Chairperson (your principal)
+- Mike Roberts — CEO
 
 ---`;
 
