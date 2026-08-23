@@ -2854,6 +2854,9 @@ function startBeverlyProactive() {
     sendVoice: (text) => sendVoiceReply(BEVERLY_WA_NUMBER, text),
     ask: askSamToWrite,
     getCalendar: getBeverlyCalendarEvents,
+    // So a scheduled digest that Claude fails to write (even after retrying)
+    // shows up on ADMIN_TELEGRAM_CHAT_IDS/Gordon instead of vanishing.
+    alertAdmin,
   });
 }
 
