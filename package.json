@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/projections.test.mjs && node test/fifo.test.mjs && node test/routing.test.mjs && node test/headers.test.mjs",
+    "test": "node test/projections.test.mjs && node test/fifo.test.mjs && node test/routing.test.mjs && node test/headers.test.mjs && node test/gordon.test.mjs",
     "test:integration": "node test/integration.test.mjs",
     "test:smoke": "node test/smoke.mjs",
     "test:all": "npm test && npm run test:integration && npm run test:smoke",
