@@ -3254,7 +3254,7 @@ async function pingHermes() {
     if (!reply) {
       return { ok: false, wallMs: Date.now() - t, error: 'no response — check the key and HERMES_MODEL' };
     }
-    return { ok: true, wallMs: Date.now() - t, model: process.env.HERMES_MODEL || 'nousresearch/hermes-4-70b' };
+    return { ok: true, wallMs: Date.now() - t, model: process.env.HERMES_MODEL || 'nousresearch/hermes-3-llama-3.1-70b' };
   } catch (err) {
     return { ok: false, wallMs: Date.now() - t, error: String(err.message || err).slice(0, 200) };
   }
