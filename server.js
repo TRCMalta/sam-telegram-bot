@@ -467,7 +467,7 @@ function buildSystemPrompt(domains = null) {
   const has = (d) => all || domains.includes(d);
 
   const parts = [
-    `Today's date is ${getMaltaDate()}. The current time in Malta is ${getMaltaTime()} (${getMaltaGreetingHint()}). Use this to greet Beverly appropriately — "Good morning", "Good afternoon", or "Good evening". NEVER greet with the wrong time of day.`,
+    `The current date and time in Malta are given at the end of these instructions. Use them to greet Beverly appropriately — "Good morning", "Good afternoon", or "Good evening". NEVER greet with the wrong time of day.`,
     PROMPT_CORE,
   ];
 
@@ -480,6 +480,26 @@ function buildSystemPrompt(domains = null) {
 
   parts.push(PROMPT_TAIL);
   return parts.join("\n");
+}
+
+// Prompt caching: buildSystemPrompt() output is static for a given domain set,
+// so it is the cached prefix. The clock and the carried-forward summary change
+// per message, so they ride in a trailing block after the cache breakpoint.
+// Putting them at the head (as before) meant the cache could never hit.
+function systemBlocks(staticPrompt, summary = null) {
+  let context = `## Current context\nToday's date is ${getMaltaDate()}. The current time in Malta is ${getMaltaTime()} (${getMaltaGreetingHint()}).`;
+  if (summary) {
+    context += `\n\n## WHAT YOU ALREADY KNOW ABOUT BEVERLY\nCarried forward from earlier conversations. Treat as established fact, do not re-ask.\n\n${summary}`;
+  }
+  return [
+    { type: "text", text: staticPrompt, cache_control: { type: "ephemeral" } },
+    { type: "text", text: context },
+  ];
+}
+
+function logCacheUsage(label, usage) {
+  if (!usage) return;
+  console.log(`[CACHE] ${label} read=${usage.cache_read_input_tokens || 0} write=${usage.cache_creation_input_tokens || 0} uncached_in=${usage.input_tokens || 0}`);
 }
 
 // ─── Sam's Tools (Claude Tool Use) ──────────────────────────────────────────
@@ -2699,7 +2719,7 @@ async function askSamToWrite(instruction, digest) {
       max_tokens: 500,
       // Proactive messages need the finance, memory and calendar context but
       // never the Malta funding-scheme rules — scope it like any other call.
-      system: buildSystemPrompt(['memory', 'finance', 'm365']),
+      system: systemBlocks(buildSystemPrompt(['memory', 'finance', 'm365'])),
       messages: [{
         role: 'user',
         content: digest && digest.trim()
@@ -2907,26 +2927,26 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       }
     }
     const activeTools = toolsForDomains(domains);
-    let systemPrompt = buildSystemPrompt(domains);
-    if (summary) {
-      systemPrompt += `\n\n---\n\n## WHAT YOU ALREADY KNOW ABOUT BEVERLY\nCarried forward from earlier conversations. Treat as established fact, do not re-ask.\n\n${summary}`;
-    }
+    const staticPrompt = buildSystemPrompt(domains);
+    const systemPrompt = systemBlocks(staticPrompt, summary);
     logEvent('ROUTE', {
       chat: chatId,
       by: routedBy,
       domains: domains === null ? 'unclassified' : (domains.join(',') || 'none'),
       tools: activeTools.length,
-      promptChars: systemPrompt.length,
+      promptChars: staticPrompt.length + (summary ? summary.length : 0),
     });
 
     // First Claude call WITH tools
     let response = await anthropic.messages.create({
       model: CLAUDE_MODEL,
       max_tokens: 4096,
+      cache_control: { type: 'ephemeral' },  // automatic: caches the conversation tail
       system: systemPrompt,
       ...(activeTools.length ? { tools: activeTools } : {}),
       messages
     });
+    logCacheUsage('turn', response.usage);
 
     // Tool-use loop - let Claude call tools and get results
     let iterations = 0;
@@ -2996,10 +3016,12 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       response = await anthropic.messages.create({
         model: CLAUDE_MODEL,
         max_tokens: 4096,
+        cache_control: { type: 'ephemeral' },
         system: systemPrompt,
         ...(activeTools.length ? { tools: activeTools } : {}),
         messages
       });
+      logCacheUsage(`tool-iter-${iterations}`, response.usage);
     }
 
     // If we hit max iterations and Claude still wants tools, make one final call WITHOUT tools to force a text summary
@@ -3010,6 +3032,7 @@ async function handleMessage(chatId, userMessage, userName, channel = 'telegram'
       response = await anthropic.messages.create({
         model: CLAUDE_MODEL,
         max_tokens: 4096,
+        cache_control: { type: 'ephemeral' },
         system: systemPrompt,
         messages
       });
