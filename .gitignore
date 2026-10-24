@@ -2,3 +2,11 @@
 .env
 node_modules
 node_modules/
+
+# Kept local; large media and personal data backed up to company OneDrive "Repo backups" (2026-10-24)
+.playwright-mcp/
+.scratch-render/
+.DS_Store
+.env.bak*
+*.bak-*
+
